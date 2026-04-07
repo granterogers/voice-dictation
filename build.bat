@@ -4,7 +4,7 @@ setlocal
 echo Building VoiceDictation...
 echo.
 
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o .\dist
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableWindowsTargeting=true -o .\dist
 
 if errorlevel 1 (
     echo.
@@ -16,10 +16,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build succeeded! Output is in the .\dist folder.
-echo Launching new version for testing...
+echo Build succeeded! Launching new version for testing...
+echo Close it and run update.bat when you're happy.
 echo.
 start "" ".\dist\VoiceDictation.exe"
-echo.
-echo Test the new version. When ready, run update.bat to install it.
 pause
