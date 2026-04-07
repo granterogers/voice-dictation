@@ -4,7 +4,7 @@ setlocal
 echo Building VoiceDictation...
 echo.
 
-dotnet publish -c Release -o .\dist
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o .\dist
 
 if errorlevel 1 (
     echo.
@@ -17,7 +17,9 @@ if errorlevel 1 (
 
 echo.
 echo Build succeeded! Output is in the .\dist folder.
-echo Don't forget to copy groq_key.txt into .\dist before running.
+echo Launching new version for testing...
 echo.
-start explorer .\dist
+start "" ".\dist\VoiceDictation.exe"
+echo.
+echo Test the new version. When ready, run update.bat to install it.
 pause
