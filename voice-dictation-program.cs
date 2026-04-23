@@ -548,7 +548,7 @@ sealed class TrayApp : ApplicationContext
     private const string WHISPER_URL   = "https://api.groq.com/openai/v1/audio/transcriptions";
     private const string WHISPER_MODEL = "whisper-large-v3-turbo";
     private const string CHAT_URL      = "https://api.groq.com/openai/v1/chat/completions";
-    private const string CHAT_MODEL    = "llama-3.3-70b-versatile";
+    private const string CHAT_MODEL    = "llama-3.1-8b-instant";
     private const double CHUNK_SEC     = 2.0;
 
     private readonly NotifyIcon _trayIcon;
@@ -791,10 +791,13 @@ sealed class TrayApp : ApplicationContext
         var body = new
         {
             model = CHAT_MODEL,
-            messages = new[]
+            messages = new object[]
             {
                 new { role = "system", content = _settings.PolishPrompt },
-                new { role = "user", content = text }
+                new { role = "user", content = text },
+                // Prefill the assistant response — forces the model to continue
+                // directly from here with no preamble or commentary.
+                new { role = "assistant", content = "" }
             },
             temperature = 0.3, max_tokens = 2048
         };
