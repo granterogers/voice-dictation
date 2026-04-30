@@ -548,7 +548,7 @@ sealed class TrayApp : ApplicationContext
     private const string WHISPER_URL   = "https://api.groq.com/openai/v1/audio/transcriptions";
     private const string WHISPER_MODEL = "whisper-large-v3-turbo";
     private const string CHAT_URL      = "https://api.groq.com/openai/v1/chat/completions";
-    private const string CHAT_MODEL    = "llama-3.1-8b-instant";
+    private const string CHAT_MODEL    = "llama-3.3-70b-versatile";
     private const double CHUNK_SEC     = 2.0;
 
     private readonly NotifyIcon _trayIcon;
@@ -788,15 +788,21 @@ sealed class TrayApp : ApplicationContext
 
     private async Task<string> Polish(string text)
     {
+        // Append a hard constraint as the final line of the system prompt,
+        // immediately before the assistant turn — this is the last instruction
+        // the model reads before generating, making it much harder to ignore.
+        var systemPrompt = _settings.PolishPrompt.TrimEnd()
+            + "\n\nREMINDER: Output ONLY the cleaned text. No explanations, no notes, no commentary. Stop immediately after the cleaned text.";
+
         var body = new
         {
             model = CHAT_MODEL,
             messages = new object[]
             {
-                new { role = "system", content = _settings.PolishPrompt },
+                new { role = "system", content = systemPrompt },
                 new { role = "user", content = text },
-                // Prefill the assistant response — forces the model to continue
-                // directly from here with no preamble or commentary.
+                // Empty assistant prefill — forces the model to continue
+                // directly with the cleaned text and no preamble.
                 new { role = "assistant", content = "" }
             },
             temperature = 0.3, max_tokens = 2048
@@ -805,7 +811,25 @@ sealed class TrayApp : ApplicationContext
             new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
         r.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
-        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+        var result = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+
+        // Safety net: strip anything that looks like trailing commentary.
+        // If the model appends a line starting with common meta-phrases, remove it.
+        var lines = result.Split('\n');
+        var trimmed = new System.Collections.Generic.List<string>();
+        foreach (var line in lines)
+        {
+            var lower = line.TrimStart().ToLowerInvariant();
+            if (lower.StartsWith("note:") || lower.StartsWith("(note") ||
+                lower.StartsWith("please note") || lower.StartsWith("i have") ||
+                lower.StartsWith("i've ") || lower.StartsWith("the above") ||
+                lower.StartsWith("this is") || lower.StartsWith("i cleaned") ||
+                lower.StartsWith("i fixed") || lower.StartsWith("changes made") ||
+                lower.StartsWith("i made") || lower.StartsWith("let me know"))
+                break; // stop here, discard this line and everything after
+            trimmed.Add(line);
+        }
+        return string.Join('\n', trimmed).TrimEnd();
     }
 
     private static string LoadApiKey()
