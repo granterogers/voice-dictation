@@ -55,7 +55,7 @@ class AppSettings
     public int StatusColorB { get; set; } = 255;
     public int InputDeviceIndex { get; set; } = -1;
     public string PolishPrompt { get; set; } =
-        "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Do light rephrasing for clarity but keep the user's tone and meaning exactly. Output ONLY the cleaned text, nothing else.";
+        "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar. Add blank lines where context implies paragraph breaks (e.g. between email greeting, body, and sign-off). Output ONLY the cleaned text. Do NOT write anything before or after it. Do NOT explain what you changed.";
 
     public static readonly string MediaDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
@@ -788,9 +788,7 @@ sealed class TrayApp : ApplicationContext
 
     private async Task<string> Polish(string text)
     {
-        // Append a hard constraint as the final line of the system prompt,
-        // immediately before the assistant turn — this is the last instruction
-        // the model reads before generating, making it much harder to ignore.
+        // Append a hard constraint as the final line of the system prompt.
         var systemPrompt = _settings.PolishPrompt.TrimEnd()
             + "\n\nREMINDER: Output ONLY the cleaned text. No explanations, no notes, no commentary. Stop immediately after the cleaned text.";
 
@@ -800,10 +798,7 @@ sealed class TrayApp : ApplicationContext
             messages = new object[]
             {
                 new { role = "system", content = systemPrompt },
-                new { role = "user", content = text },
-                // Empty assistant prefill — forces the model to continue
-                // directly with the cleaned text and no preamble.
-                new { role = "assistant", content = "" }
+                new { role = "user", content = text }
             },
             temperature = 0.3, max_tokens = 2048
         };
@@ -813,8 +808,7 @@ sealed class TrayApp : ApplicationContext
         using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
         var result = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
 
-        // Safety net: strip anything that looks like trailing commentary.
-        // If the model appends a line starting with common meta-phrases, remove it.
+        // Safety net: strip trailing commentary if the model adds it anyway.
         var lines = result.Split('\n');
         var trimmed = new System.Collections.Generic.List<string>();
         foreach (var line in lines)
@@ -826,7 +820,7 @@ sealed class TrayApp : ApplicationContext
                 lower.StartsWith("this is") || lower.StartsWith("i cleaned") ||
                 lower.StartsWith("i fixed") || lower.StartsWith("changes made") ||
                 lower.StartsWith("i made") || lower.StartsWith("let me know"))
-                break; // stop here, discard this line and everything after
+                break;
             trimmed.Add(line);
         }
         return string.Join('\n', trimmed).TrimEnd();
