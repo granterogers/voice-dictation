@@ -2,7 +2,6 @@
 // VoiceDictation — Win+\ to record, auto-stops on silence, transcribes & polishes
 // C# / .NET 8 / Windows Forms / NAudio
 // ============================================================================
-
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -36,6 +35,7 @@ static class Program
 // ============================================================================
 // Settings
 // ============================================================================
+
 class AppSettings
 {
     public string SoundStart { get; set; } = "Speech On.wav";
@@ -63,6 +63,7 @@ class AppSettings
     public Color OverlayBgColor => Color.FromArgb(OverlayBgR, OverlayBgG, OverlayBgB);
     public Color TextColor => Color.FromArgb(TextColorR, TextColorG, TextColorB);
     public Color StatusColor => Color.FromArgb(StatusColorR, StatusColorG, StatusColorB);
+
     public string SoundStartPath => Path.Combine(MediaDir, SoundStart);
     public string SoundDonePath => Path.Combine(MediaDir, SoundDone);
     public string SoundErrorPath => Path.Combine(MediaDir, SoundError);
@@ -98,6 +99,7 @@ class AppSettings
 // ============================================================================
 // Settings form
 // ============================================================================
+
 sealed class SettingsForm : Form
 {
     private readonly AppSettings _s;
@@ -261,7 +263,7 @@ sealed class SettingsForm : Form
         _prevPanel.BackColor = Color.FromArgb(alpha, _bgColor.R, _bgColor.G, _bgColor.B);
         _prevStatus.ForeColor = _statusColor;
         _prevStatus.Font = new Font("Segoe UI", Math.Max(fs - 1.5f, 8f), FontStyle.Bold);
-        _prevStatus.Text = "\U0001F3A4  Listening...";
+        _prevStatus.Text = "\U0001F3A4 Listening...";
         _prevText.ForeColor = _textColor;
         _prevText.Font = new Font("Segoe UI", fs);
         _prevText.Text = "This is how your transcript will look.";
@@ -302,18 +304,15 @@ sealed class SettingsForm : Form
             Location = new Point(x, y), Size = new Size(380, 24),
             DropDownStyle = ComboBoxStyle.DropDownList
         };
-
         int selIdx = -1;
         for (int i = 0; i < _wavNames.Length; i++)
         {
             cmb.Items.Add(Path.GetFileNameWithoutExtension(_wavNames[i]));
-            // Match stored filename (e.g. "Windows Notify.wav") OR display name without extension
             if (string.Equals(_wavNames[i], currentFile, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(Path.GetFileNameWithoutExtension(_wavNames[i]), currentFile, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(_wavNames[i], Path.GetFileName(currentFile), StringComparison.OrdinalIgnoreCase))
                 selIdx = i;
         }
-        // If no match found (e.g. old full-path setting), try matching just the filename portion
         if (selIdx < 0 && !string.IsNullOrEmpty(currentFile))
         {
             string justName = Path.GetFileName(currentFile);
@@ -327,7 +326,6 @@ sealed class SettingsForm : Form
             cmb.SelectedIndex = Math.Max(selIdx, 0);
         Controls.Add(cmb);
 
-        // Play button
         var btn = new Button
         {
             Text = "\u25B6", Size = new Size(26, 24), Location = new Point(x + 384, y),
@@ -339,7 +337,6 @@ sealed class SettingsForm : Form
             try { if (File.Exists(path)) new SoundPlayer(path).Play(); } catch { }
         };
         Controls.Add(btn);
-
         return cmb;
     }
 
@@ -368,6 +365,7 @@ sealed class SettingsForm : Form
 // ============================================================================
 // Overlay window
 // ============================================================================
+
 sealed class OverlayForm : Form
 {
     private readonly Label _statusLabel;
@@ -381,7 +379,6 @@ sealed class OverlayForm : Form
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(440, 180);
-
         try { int pref = 2; DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int)); } catch { }
 
         _panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 12, 16, 12) };
@@ -430,6 +427,7 @@ sealed class OverlayForm : Form
         Left = wa.Right - Width - 12;
         Top = wa.Bottom - Height - 12;
         Show();
+        BringToFront();
     }
 
     public void SetText(string text)
@@ -451,6 +449,7 @@ sealed class OverlayForm : Form
     }
 
     protected override bool ShowWithoutActivation => true;
+
     protected override CreateParams CreateParams
     {
         get
@@ -465,6 +464,7 @@ sealed class OverlayForm : Form
 // ============================================================================
 // Audio recorder
 // ============================================================================
+
 sealed class AudioRecorder : IDisposable
 {
     public const int SAMPLE_RATE = 16000;
@@ -485,6 +485,11 @@ sealed class AudioRecorder : IDisposable
     public bool IsFinished => _done.IsSet;
     public int TotalBytesWritten { get { lock (_lock) return _totalBytesWritten; } }
 
+    // ---- NEW: snapshot of bytes written at last chunk boundary ----
+    private int _bytesAtLastChunk = 0;
+    public int BytesSinceLastChunk { get { lock (_lock) return _totalBytesWritten - _bytesAtLastChunk; } }
+    public void MarkChunkSent() { lock (_lock) _bytesAtLastChunk = _totalBytesWritten; }
+
     public AudioRecorder(int deviceIndex = -1)
     {
         _ms = new MemoryStream();
@@ -502,12 +507,14 @@ sealed class AudioRecorder : IDisposable
     public void Start() { _startTime = DateTime.UtcNow; _capture.StartRecording(); }
     public void StopNow() { try { _capture.StopRecording(); } catch { } }
     public void WaitUntilDone() => _done.Wait();
+
     public byte[] GetCurrentWav() { lock (_lock) { _writer.Flush(); return _ms.ToArray(); } }
     public byte[] GetFinalWav() { lock (_lock) { _writer.Flush(); return _ms.ToArray(); } }
 
     private void OnData(object sender, WaveInEventArgs e)
     {
         lock (_lock) { _writer.Write(e.Buffer, 0, e.BytesRecorded); _totalBytesWritten += e.BytesRecorded; }
+
         double rms = ComputeRms(e.Buffer, e.BytesRecorded);
         double elapsed = (DateTime.UtcNow - _startTime).TotalSeconds;
         double chunkSec = (double)e.BytesRecorded / _capture.WaveFormat.AverageBytesPerSecond;
@@ -518,6 +525,7 @@ sealed class AudioRecorder : IDisposable
             _silenceAccum += chunkSec;
             if (_silenceAccum >= SILENCE_DURATION) _capture.StopRecording();
         }
+
         if (elapsed > MAX_RECORD_SEC) _capture.StopRecording();
     }
 
@@ -541,41 +549,44 @@ sealed class AudioRecorder : IDisposable
 // ============================================================================
 // Tray application
 // ============================================================================
+
 sealed class TrayApp : ApplicationContext
 {
     private static readonly string GROQ_API_KEY = LoadApiKey();
-
-    private const string WHISPER_URL   = "https://api.groq.com/openai/v1/audio/transcriptions";
+    private const string WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
     private const string WHISPER_MODEL = "whisper-large-v3-turbo";
-    private const string CHAT_URL      = "https://api.groq.com/openai/v1/chat/completions";
-    private const string CHAT_MODEL    = "llama-3.3-70b-versatile";
-    private const double CHUNK_SEC     = 2.0;
+    private const string CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
+    private const string CHAT_MODEL = "llama-3.3-70b-versatile";
+
+    // Minimum new audio (bytes) before we fire a live-preview transcription.
+    // At 16kHz/16bit/mono: 1 byte = 31.25µs → 32000 bytes ≈ 1 second of audio.
+    private const int LIVE_PREVIEW_MIN_NEW_BYTES = 32000; // ~1 second
 
     private readonly NotifyIcon _trayIcon;
     private readonly HotkeyWindow _hotkeyWindow;
     private readonly HttpClient _http;
     private readonly OverlayForm _overlay;
     private AppSettings _settings;
-    private volatile bool _isRecording;
-    private volatile bool _stopRequested;   // Win+\ pressed again → stop recording, proceed to transcribe
-    private volatile bool _cancelRequested; // Escape pressed → cancel everything silently
-    private AudioRecorder? _activeRecorder; // reference so hotkeys can stop it
 
-    private const int HOTKEY_ID       = 1;
-    private const int HOTKEY_ESCAPE   = 2;
-    private const int MOD_WIN         = 0x0008;
-    private const int MOD_NOREPEAT    = 0x4000;
-    private const int VK_OEM_5        = 0xDC; // backslash
-    private const int VK_ESCAPE       = 0x1B;
+    private volatile bool _isRecording;
+    private volatile bool _stopRequested;
+    private volatile bool _cancelRequested;
+    private AudioRecorder? _activeRecorder;
+
+    private const int HOTKEY_ID = 1;
+    private const int HOTKEY_ESCAPE = 2;
+    private const int MOD_WIN = 0x0008;
+    private const int MOD_NOREPEAT = 0x4000;
+    private const int VK_OEM_5 = 0xDC;
+    private const int VK_ESCAPE = 0x1B;
 
     public TrayApp()
     {
         _settings = AppSettings.Load();
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GROQ_API_KEY);
+
         _overlay = new OverlayForm(_settings);
-        // Force handle creation on the UI thread so InvokeRequired works correctly
-        // from background threads before the overlay has ever been shown.
         _ = _overlay.Handle;
 
         _trayIcon = new NotifyIcon
@@ -585,8 +596,9 @@ sealed class TrayApp : ApplicationContext
         };
 
         _hotkeyWindow = new HotkeyWindow(OnHotkeyPressed);
-        HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID,     MOD_WIN,      VK_OEM_5);
+        HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID, MOD_WIN, VK_OEM_5);
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
+
         PlaySound(_settings.SoundStartPath);
     }
 
@@ -651,7 +663,6 @@ sealed class TrayApp : ApplicationContext
     {
         if (id == HOTKEY_ESCAPE)
         {
-            // Escape: cancel any active recording immediately
             if (_isRecording)
             {
                 _cancelRequested = true;
@@ -660,19 +671,18 @@ sealed class TrayApp : ApplicationContext
             return;
         }
 
-        // Win+\ pressed
         if (_isRecording)
         {
-            // Already recording — stop immediately and proceed to transcribe
             _stopRequested = true;
             _activeRecorder?.StopNow();
             PlaySound(_settings.SoundDonePath);
             return;
         }
 
-        _isRecording     = true;
-        _stopRequested   = false;
+        _isRecording = true;
+        _stopRequested = false;
         _cancelRequested = false;
+
         Task.Run(async () =>
         {
             try { await RunPipeline(); }
@@ -684,20 +694,25 @@ sealed class TrayApp : ApplicationContext
     private async Task RunPipeline()
     {
         PlaySound(_settings.SoundStartPath);
-        _overlay.ShowOverlay("\U0001F3A4  Listening...");
+        _overlay.ShowOverlay("\U0001F3A4 Listening...");
 
         using var rec = new AudioRecorder(_settings.InputDeviceIndex);
         _activeRecorder = rec;
         rec.Start();
 
+        // Best live text we have so far (accumulates across preview calls)
         string liveText = "";
-        var lastChunk = DateTime.UtcNow;
+
+        // True once we've fired at least one successful live preview
+        bool hasLivePreview = false;
+
+        // Whether a live-preview transcription is currently in flight
+        bool previewInFlight = false;
 
         while (!rec.IsFinished)
         {
-            await Task.Delay(200);
+            await Task.Delay(150);
 
-            // Escape pressed — cancel silently
             if (_cancelRequested)
             {
                 _overlay.HideOverlay();
@@ -705,25 +720,42 @@ sealed class TrayApp : ApplicationContext
                 return;
             }
 
-            if ((DateTime.UtcNow - lastChunk).TotalSeconds >= CHUNK_SEC && rec.TotalBytesWritten > 16000)
+            // Fire a new live preview when:
+            //   - no preview is already running
+            //   - enough new audio has accumulated since the last preview was sent
+            //   - total audio is at least ~0.5 s (8000 bytes) so Whisper has something to chew on
+            if (!previewInFlight
+                && rec.BytesSinceLastChunk >= LIVE_PREVIEW_MIN_NEW_BYTES
+                && rec.TotalBytesWritten >= 8000)
             {
-                lastChunk = DateTime.UtcNow;
-                try
+                previewInFlight = true;
+                rec.MarkChunkSent();
+
+                // Snapshot the WAV right now and fire off transcription concurrently
+                var wavSnapshot = rec.GetCurrentWav();
+
+                _ = Task.Run(async () =>
                 {
-                    var wav = rec.GetCurrentWav();
-                    if (wav.Length > 10000)
+                    try
                     {
-                        var t = await Transcribe(wav);
-                        if (!string.IsNullOrWhiteSpace(t)) { liveText = t; _overlay.SetText(liveText); }
+                        var t = await Transcribe(wavSnapshot);
+                        if (!string.IsNullOrWhiteSpace(t))
+                        {
+                            liveText = t;
+                            hasLivePreview = true;
+                            // Show the live text and update status to make it clear it's a preview
+                            _overlay.SetText(liveText);
+                            _overlay.SetStatus("\U0001F3A4 Listening... (live preview)");
+                        }
                     }
-                }
-                catch { }
+                    catch { /* silent — final transcription will cover it */ }
+                    finally { previewInFlight = false; }
+                });
             }
         }
 
         _activeRecorder = null;
 
-        // Final cancel check (may have been set just as recording stopped)
         if (_cancelRequested)
         {
             _overlay.HideOverlay();
@@ -731,35 +763,43 @@ sealed class TrayApp : ApplicationContext
         }
 
         rec.WaitUntilDone();
-        var finalWav = rec.GetFinalWav();
 
+        var finalWav = rec.GetFinalWav();
         if (finalWav.Length < 10000)
         {
             PlaySound(_settings.SoundErrorPath);
-            _overlay.SetStatus("\u274C  No speech detected");
+            _overlay.SetStatus("\u274C No speech detected");
             await Task.Delay(1500); _overlay.HideOverlay(); return;
         }
 
-        _overlay.SetStatus("\U0001F50D  Transcribing...");
+        _overlay.SetStatus("\U0001F50D Transcribing...");
+
         string raw;
-        try { raw = await Transcribe(finalWav); } catch { raw = liveText; }
+        try { raw = await Transcribe(finalWav); }
+        catch { raw = liveText; }
 
         if (string.IsNullOrWhiteSpace(raw))
         {
-            PlaySound(_settings.SoundErrorPath);
-            _overlay.SetStatus("\u274C  No text returned");
-            await Task.Delay(1500); _overlay.HideOverlay(); return;
+            // Fall back to whatever the live preview had
+            if (!string.IsNullOrWhiteSpace(liveText))
+                raw = liveText;
+            else
+            {
+                PlaySound(_settings.SoundErrorPath);
+                _overlay.SetStatus("\u274C No text returned");
+                await Task.Delay(1500); _overlay.HideOverlay(); return;
+            }
         }
 
         _overlay.SetText(raw);
-        _overlay.SetStatus("\u2728  Cleaning up before pasting...");
+        _overlay.SetStatus("\u2728 Cleaning up before pasting...");
 
         string polished = "";
         try { polished = await Polish(raw); } catch { PlaySound(_settings.SoundErrorPath); }
 
         string output = !string.IsNullOrWhiteSpace(polished) ? polished : raw;
         _overlay.SetText(output);
-        _overlay.SetStatus("\u2705  Done!");
+        _overlay.SetStatus("\u2705 Done!");
 
         var tcs = new TaskCompletionSource();
         var sta = new Thread(() => { Clipboard.SetText(output); tcs.SetResult(); });
@@ -788,7 +828,6 @@ sealed class TrayApp : ApplicationContext
 
     private async Task<string> Polish(string text)
     {
-        // Append a hard constraint as the final line of the system prompt.
         var systemPrompt = _settings.PolishPrompt.TrimEnd()
             + "\n\nREMINDER: Output ONLY the cleaned text. No explanations, no notes, no commentary. Stop immediately after the cleaned text.";
 
@@ -802,13 +841,13 @@ sealed class TrayApp : ApplicationContext
             },
             temperature = 0.3, max_tokens = 2048
         };
+
         var r = await _http.PostAsync(CHAT_URL,
             new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
         r.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
         var result = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
 
-        // Safety net: strip trailing commentary if the model adds it anyway.
         var lines = result.Split('\n');
         var trimmed = new System.Collections.Generic.List<string>();
         foreach (var line in lines)
@@ -845,6 +884,7 @@ sealed class TrayApp : ApplicationContext
 
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     private static void SendCtrlV()
     {
         keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x56, 0, 0, UIntPtr.Zero);
