@@ -1,0 +1,17 @@
+## Build output
+bin/
+obj/
+*.exe
+*.exe.bak
+*.dll
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+## Local secrets / machine-specific settings
+groq_key.txt
+settings.json
+
+## OS junk
+Thumbs.db
+desktop.ini

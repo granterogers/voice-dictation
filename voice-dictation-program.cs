@@ -4,6 +4,7 @@
 // ============================================================================
 
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -56,6 +57,7 @@ class AppSettings
     public int InputDeviceIndex { get; set; } = -1;
     public string PolishPrompt { get; set; } =
         "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Do light rephrasing for clarity but keep the user's tone and meaning exactly. Output ONLY the cleaned text, nothing else.";
+    public string GroqKeyPath { get; set; }
 
     public static readonly string MediaDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
@@ -426,7 +428,8 @@ sealed class OverlayForm : Form
         if (InvokeRequired) { Invoke(() => ShowOverlay(status)); return; }
         _statusLabel.Text = status;
         _textLabel.Text = "";
-        var wa = Screen.PrimaryScreen!.WorkingArea;
+        var screen = Screen.PrimaryScreen ?? Screen.FromPoint(Cursor.Position) ?? Screen.AllScreens[0];
+        var wa = screen.WorkingArea;
         Left = wa.Right - Width - 12;
         Top = wa.Bottom - Height - 12;
         Show();
@@ -542,7 +545,7 @@ sealed class AudioRecorder : IDisposable
 // ============================================================================
 sealed class TrayApp : ApplicationContext
 {
-    private static readonly string GROQ_API_KEY = LoadApiKey();
+    private string _groqApiKey = "";
 
     private const string WHISPER_URL   = "https://api.groq.com/openai/v1/audio/transcriptions";
     private const string WHISPER_MODEL = "whisper-large-v3-turbo";
@@ -563,7 +566,6 @@ sealed class TrayApp : ApplicationContext
     {
         _settings = AppSettings.Load();
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GROQ_API_KEY);
         _overlay = new OverlayForm(_settings);
 
         _trayIcon = new NotifyIcon
@@ -572,9 +574,19 @@ sealed class TrayApp : ApplicationContext
             Visible = true, ContextMenuStrip = BuildMenu()
         };
 
+        SetApiKey(LoadApiKey(promptIfMissing: true));
+
         _hotkeyWindow = new HotkeyWindow(OnHotkeyPressed);
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID, MOD_WIN, VK_OEM_5);
         PlaySound(_settings.SoundStartPath);
+    }
+
+    private void SetApiKey(string key)
+    {
+        _groqApiKey = key;
+        _http.DefaultRequestHeaders.Authorization = string.IsNullOrEmpty(key)
+            ? null
+            : new AuthenticationHeaderValue("Bearer", key);
     }
 
     private ContextMenuStrip BuildMenu()
@@ -583,6 +595,7 @@ sealed class TrayApp : ApplicationContext
         m.Items.Add("Voice Dictation (Win+\\)").Enabled = false;
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("Settings...", null, (_, _) => OpenSettings());
+        m.Items.Add("Set Groq API Key...", null, (_, _) => SetApiKey(LoadApiKey(promptIfMissing: true)));
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("Quit", null, (_, _) =>
         {
@@ -636,11 +649,21 @@ sealed class TrayApp : ApplicationContext
     private void OnHotkeyPressed()
     {
         if (_isRecording) return;
+        if (string.IsNullOrEmpty(_groqApiKey))
+        {
+            SetApiKey(LoadApiKey(promptIfMissing: true));
+            if (string.IsNullOrEmpty(_groqApiKey)) return;
+        }
         _isRecording = true;
         Task.Run(async () =>
         {
             try { await RunPipeline(); }
-            catch { PlaySound(_settings.SoundErrorPath); _overlay.HideOverlay(); }
+            catch (Exception ex)
+            {
+                File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "error.log"), ex + Environment.NewLine);
+                PlaySound(_settings.SoundErrorPath);
+                _overlay.HideOverlay();
+            }
             finally { _isRecording = false; }
         });
     }
@@ -750,15 +773,48 @@ sealed class TrayApp : ApplicationContext
         return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
     }
 
-    private static string LoadApiKey()
+    private string LoadApiKey(bool promptIfMissing)
     {
-        foreach (var dir in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
+        var candidates = new List<string>();
+        if (!string.IsNullOrEmpty(_settings.GroqKeyPath)) candidates.Add(_settings.GroqKeyPath);
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "groq_key.txt"));
+        candidates.Add(Path.Combine(Directory.GetCurrentDirectory(), "groq_key.txt"));
+
+        foreach (var p in candidates)
         {
-            var p = Path.Combine(dir, "groq_key.txt");
-            if (File.Exists(p)) { var k = File.ReadAllText(p).Trim(); if (!string.IsNullOrEmpty(k)) return k; }
+            if (File.Exists(p))
+            {
+                var k = File.ReadAllText(p).Trim();
+                if (!string.IsNullOrEmpty(k)) return k;
+            }
         }
-        MessageBox.Show("groq_key.txt not found.", "Voice Dictation", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        Environment.Exit(1); return "";
+
+        if (!promptIfMissing) return "";
+
+        MessageBox.Show(
+            "Voice Dictation needs a Groq API key to transcribe audio.\nSelect the text file that contains your key.",
+            "Voice Dictation — API Key Needed", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Locate Groq API key file",
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+        };
+        if (dlg.ShowDialog() == DialogResult.OK)
+        {
+            var k = File.ReadAllText(dlg.FileName).Trim();
+            if (!string.IsNullOrEmpty(k))
+            {
+                _settings.GroqKeyPath = dlg.FileName;
+                _settings.Save();
+                return k;
+            }
+        }
+
+        MessageBox.Show(
+            "No API key set. Dictation will be unavailable until you provide one (right-click the tray icon > \"Set Groq API Key...\").",
+            "Voice Dictation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return "";
     }
 
     private void PlaySound(string path)
