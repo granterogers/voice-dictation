@@ -55,7 +55,13 @@ class AppSettings
     public int StatusColorB { get; set; } = 255;
     public int InputDeviceIndex { get; set; } = -1;
     public string PolishPrompt { get; set; } =
-        "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar. Add blank lines where context implies paragraph breaks (e.g. between email greeting, body, and sign-off). Output ONLY the cleaned text. Do NOT write anything before or after it. Do NOT explain what you changed.";
+        "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar.\n\n" +
+        "Format the result like a well-structured email or message, even if the speaker did not pause between sections:\n" +
+        "- If there is a greeting (e.g. \"Hi Sarah\", \"Hey team\"), put it alone on the first line, followed by a blank line.\n" +
+        "- Break the body into separate paragraphs by topic or idea shift. Each paragraph should usually be a few sentences, not a single wall of text. Separate every paragraph with one blank line.\n" +
+        "- If there is a closing/sign-off (e.g. \"Thanks\", \"Best regards\", a name), put it alone on the last line(s), separated from the body by a blank line.\n" +
+        "- If the dictation is a short one- or two-sentence note with no clear greeting/body/sign-off structure, leave it as a single paragraph — do not invent structure that isn't there.\n\n" +
+        "Output ONLY the cleaned text, including the blank lines described above. Do NOT write anything before or after it. Do NOT explain what you changed.";
 
     public static readonly string MediaDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
@@ -597,7 +603,6 @@ sealed class TrayApp : ApplicationContext
 
         _hotkeyWindow = new HotkeyWindow(OnHotkeyPressed);
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID, MOD_WIN, VK_OEM_5);
-        HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
 
         PlaySound(_settings.SoundStartPath);
     }
@@ -682,12 +687,17 @@ sealed class TrayApp : ApplicationContext
         _isRecording = true;
         _stopRequested = false;
         _cancelRequested = false;
+        HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
 
         Task.Run(async () =>
         {
             try { await RunPipeline(); }
             catch { PlaySound(_settings.SoundErrorPath); _overlay.HideOverlay(); }
-            finally { _isRecording = false; }
+            finally
+            {
+                _isRecording = false;
+                HotkeyWindow.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE);
+            }
         });
     }
 
@@ -872,6 +882,23 @@ sealed class TrayApp : ApplicationContext
             var p = Path.Combine(dir, "groq_key.txt");
             if (File.Exists(p)) { var k = File.ReadAllText(p).Trim(); if (!string.IsNullOrEmpty(k)) return k; }
         }
+
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Locate groq_key.txt",
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dlg.ShowDialog() == DialogResult.OK)
+        {
+            var k = File.ReadAllText(dlg.FileName).Trim();
+            if (!string.IsNullOrEmpty(k))
+            {
+                try { File.Copy(dlg.FileName, Path.Combine(AppContext.BaseDirectory, "groq_key.txt"), overwrite: true); } catch { }
+                return k;
+            }
+        }
+
         MessageBox.Show("groq_key.txt not found.", "Voice Dictation", MessageBoxButtons.OK, MessageBoxIcon.Error);
         Environment.Exit(1); return "";
     }
