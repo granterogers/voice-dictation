@@ -9,6 +9,7 @@ using System.IO;
 using System.Media;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -30,6 +31,14 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new TrayApp());
     }
+}
+
+static class AppVersion
+{
+    public static readonly string Current =
+        Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "v0.0.0-dev";
 }
 
 // ============================================================================
@@ -56,11 +65,14 @@ class AppSettings
     public int InputDeviceIndex { get; set; } = -1;
     public string PolishPrompt { get; set; } =
         "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar.\n\n" +
-        "Format the result like a well-structured email or message, even if the speaker did not pause between sections:\n" +
-        "- If there is a greeting (e.g. \"Hi Sarah\", \"Hey team\"), put it alone on the first line, followed by a blank line.\n" +
-        "- Break the body into separate paragraphs by topic or idea shift. Each paragraph should usually be a few sentences, not a single wall of text. Separate every paragraph with one blank line.\n" +
-        "- If there is a closing/sign-off (e.g. \"Thanks\", \"Best regards\", a name), put it alone on the last line(s), separated from the body by a blank line.\n" +
-        "- If the dictation is a short one- or two-sentence note with no clear greeting/body/sign-off structure, leave it as a single paragraph — do not invent structure that isn't there.\n\n" +
+        "Format the result like a well-structured email or message:\n" +
+        "- If there is a greeting (e.g. \"Hi Sarah\", \"Hey team\"), it ALWAYS goes alone on the first line, followed by a blank line — even in a short one-sentence message.\n" +
+        "- If there is a closing/sign-off (e.g. \"Thanks\", \"Best wishes\", \"Best regards\", a name), it ALWAYS goes alone on its own line at the end, separated from the body by a blank line — even in a short message.\n" +
+        "- The body sits between the greeting and sign-off. If it covers more than one topic or idea, split it into separate paragraphs separated by one blank line; a single-idea body stays as one paragraph.\n" +
+        "- If there is no greeting or sign-off at all, don't invent one — just clean up the text as a single paragraph.\n\n" +
+        "Example input: \"Hi Sergio thanks for reaching out if you could kindly provide me a phone number to reach you I will give you a call best wishes\"\n" +
+        "Example output:\n" +
+        "Hi Sergio,\n\nThanks for reaching out. If you could kindly provide me a phone number to reach you, I will give you a call.\n\nBest wishes.\n\n" +
         "Output ONLY the cleaned text, including the blank lines described above. Do NOT write anything before or after it. Do NOT explain what you changed.";
 
     public static readonly string MediaDir = Path.Combine(
@@ -143,7 +155,7 @@ sealed class SettingsForm : Form
             _wavNames = Array.Empty<string>();
         }
 
-        Text = "Voice Dictation — Settings";
+        Text = $"Voice Dictation — Settings ({AppVersion.Current})";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -253,6 +265,15 @@ sealed class SettingsForm : Form
         y += 98;
 
         // === BUTTONS ===
+        var lblVersion = new Label
+        {
+            Text = AppVersion.Current, AutoSize = true,
+            ForeColor = Color.FromArgb(130, 130, 130),
+            Font = new Font("Segoe UI", 8f),
+            Location = new Point(12, y + 8)
+        };
+        Controls.Add(lblVersion);
+
         var btnSave = new Button { Text = "Save", Size = new Size(80, 30), Location = new Point(340, y) };
         btnSave.Click += (_, _) => { DoSave(); DialogResult = DialogResult.OK; Close(); };
         Controls.Add(btnSave);

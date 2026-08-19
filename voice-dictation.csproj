@@ -9,8 +9,31 @@
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
+
+  <Target Name="SetVersionFromGitTag" BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo">
+    <!-- Tags pointing at HEAD, newest-version-first; falls back to the nearest reachable tag. -->
+    <Exec Command="git tag --points-at HEAD --sort=-v:refname" ConsoleToMSBuild="true" StandardOutputImportance="low" ContinueOnError="true" WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitTagsAtHead" />
+    </Exec>
+    <Exec Command="git describe --tags --abbrev=0" ConsoleToMSBuild="true" StandardOutputImportance="low" ContinueOnError="true" WorkingDirectory="$(MSBuildProjectDirectory)">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitTagFallback" />
+    </Exec>
+    <PropertyGroup>
+      <_GitTagsAtHeadJoined>@(_GitTagsAtHead)</_GitTagsAtHeadJoined>
+      <_GitTagFallbackJoined>@(_GitTagFallback)</_GitTagFallbackJoined>
+      <GitVersionTag Condition="'$(_GitTagsAtHeadJoined)' != ''">$(_GitTagsAtHeadJoined.Split(';')[0])</GitVersionTag>
+      <GitVersionTag Condition="'$(GitVersionTag)' == '' and '$(_GitTagFallbackJoined)' != ''">$(_GitTagFallbackJoined.Split(';')[0])</GitVersionTag>
+      <GitVersionTag Condition="'$(GitVersionTag)' == ''">v0.0.0-dev</GitVersionTag>
+      <InformationalVersion>$(GitVersionTag)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="PrintVersionAfterPublish" AfterTargets="Publish">
+    <Message Importance="high" Text="Build version: $(InformationalVersion)" />
+  </Target>
 </Project>
