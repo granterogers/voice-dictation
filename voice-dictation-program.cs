@@ -8,11 +8,13 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Media;
 using System.Net.Http;
+using System.Linq;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -66,13 +68,16 @@ class AppSettings
     public string PolishPrompt { get; set; } =
         "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar.\n\n" +
         "Format the result like a well-structured email or message:\n" +
-        "- If there is a greeting (e.g. \"Hi Sarah\", \"Hey team\"), it ALWAYS goes alone on the first line, followed by a blank line — even in a short one-sentence message.\n" +
+        "- If there is a greeting (e.g. \"Hi Sarah\", \"Hey team\"), it ALWAYS goes alone on the first line, followed by a blank line — even in a short message.\n" +
         "- If there is a closing/sign-off (e.g. \"Thanks\", \"Best wishes\", \"Best regards\", a name), it ALWAYS goes alone on its own line at the end, separated from the body by a blank line — even in a short message.\n" +
-        "- The body sits between the greeting and sign-off. If it covers more than one topic or idea, split it into separate paragraphs separated by one blank line; a single-idea body stays as one paragraph.\n" +
-        "- If there is no greeting or sign-off at all, don't invent one — just clean up the text as a single paragraph.\n\n" +
-        "Example input: \"Hi Sergio thanks for reaching out if you could kindly provide me a phone number to reach you I will give you a call best wishes\"\n" +
-        "Example output:\n" +
+        "- The body sits between the greeting and sign-off. NEVER write more than 2-3 sentences in a row without breaking to a new paragraph. Break to a new paragraph at every step, topic shift, or transition word (\"But\", \"So\", \"Also\", \"Then\", \"After that\", \"Thereafter\", \"However\"). Separate every paragraph with exactly one blank line. A long explanation must become several short paragraphs — never one dense block of text.\n" +
+        "- If there is no greeting or sign-off at all, don't invent one — just apply the same 2-3-sentence paragraph rule to the whole text.\n\n" +
+        "Example 1 input: \"Hi Sergio thanks for reaching out if you could kindly provide me a phone number to reach you I will give you a call best wishes\"\n" +
+        "Example 1 output:\n" +
         "Hi Sergio,\n\nThanks for reaching out. If you could kindly provide me a phone number to reach you, I will give you a call.\n\nBest wishes.\n\n" +
+        "Example 2 input: \"Hi Dylan thanks for your patience while I looked over this yes so if you're using the default saw optimizer then that should by default include perfect graining so you shouldn't really need to use the cut right template pattern names but if you really feel like you have to then what you need to do is within the processing station settings you need to switch from microvellum sawing optimizer to the cut right ASCII option thereafter you should be able to drag across the template patterns you wish\"\n" +
+        "Example 2 output:\n" +
+        "Hi Dylan,\n\nThanks for your patience while I looked over this. Yes, if you're using the default saw optimizer, that should by default include perfect graining, so you shouldn't really need to use the Cut Right template pattern names.\n\nBut if you really feel like you have to, within the processing station settings you need to switch from the Microvellum sawing optimizer to the Cut Right ASCII option.\n\nThereafter, you should be able to drag across the template patterns you wish.\n\n" +
         "Output ONLY the cleaned text, including the blank lines described above. Do NOT write anything before or after it. Do NOT explain what you changed.";
 
     public static readonly string MediaDir = Path.Combine(
@@ -632,6 +637,7 @@ sealed class TrayApp : ApplicationContext
     {
         var m = new ContextMenuStrip();
         m.Items.Add("Voice Dictation (Win+\\)").Enabled = false;
+        m.Items.Add(AppVersion.Current).Enabled = false;
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add("Settings...", null, (_, _) => OpenSettings());
         m.Items.Add(new ToolStripSeparator());
@@ -829,6 +835,7 @@ sealed class TrayApp : ApplicationContext
         try { polished = await Polish(raw); } catch { PlaySound(_settings.SoundErrorPath); }
 
         string output = !string.IsNullOrWhiteSpace(polished) ? polished : raw;
+        try { output = EnforceMessageStructure(output); } catch { /* keep unformatted output on failure */ }
         _overlay.SetText(output);
         _overlay.SetStatus("\u2705 Done!");
 
@@ -870,7 +877,7 @@ sealed class TrayApp : ApplicationContext
                 new { role = "system", content = systemPrompt },
                 new { role = "user", content = text }
             },
-            temperature = 0.3, max_tokens = 2048
+            temperature = 0.15, max_tokens = 2048
         };
 
         var r = await _http.PostAsync(CHAT_URL,
@@ -894,6 +901,78 @@ sealed class TrayApp : ApplicationContext
             trimmed.Add(line);
         }
         return string.Join('\n', trimmed).TrimEnd();
+    }
+
+    private static readonly string[] SignOffPhrases =
+    {
+        "best wishes", "best regards", "kind regards", "warm regards", "all the best",
+        "many thanks", "thank you so much", "thanks so much", "thank you", "thanks",
+        "sincerely", "cheers", "talk soon", "take care", "regards"
+    };
+
+    private static readonly string[] TransitionWords =
+    {
+        "but", "so", "however", "then", "also", "thereafter", "additionally", "meanwhile"
+    };
+
+    // Deterministic fallback formatting so greeting/body/sign-off structure and paragraph
+    // breaks always land, regardless of whether the AI cleanup pass applied them.
+    private static string EnforceMessageStructure(string text)
+    {
+        text = text.Trim();
+        if (text.Length == 0) return text;
+
+        string greetingLine = null;
+        var greetingMatch = Regex.Match(text, @"^(Hi|Hey|Hello|Dear|Greetings)\s+([A-Za-z][A-Za-z'-]{0,30})\s*,?\s*", RegexOptions.IgnoreCase);
+        if (greetingMatch.Success)
+        {
+            var salutation = greetingMatch.Groups[1].Value;
+            var name = greetingMatch.Groups[2].Value;
+            greetingLine = $"{char.ToUpper(salutation[0])}{salutation.Substring(1).ToLower()} {name},";
+            text = text.Substring(greetingMatch.Length).TrimStart();
+            if (text.Length > 0 && char.IsLower(text[0]))
+                text = char.ToUpper(text[0]) + text.Substring(1);
+        }
+
+        var sentences = Regex.Split(text, @"(?<=[.!?])\s+").Where(s => s.Trim().Length > 0).ToList();
+
+        string signOffLine = null;
+        if (sentences.Count > 0)
+        {
+            var last = sentences[^1].Trim().TrimEnd('.', '!', '?', ' ');
+            foreach (var phrase in SignOffPhrases)
+            {
+                if (last.Equals(phrase, StringComparison.OrdinalIgnoreCase))
+                {
+                    signOffLine = $"{char.ToUpper(last[0])}{last.Substring(1)}.";
+                    sentences.RemoveAt(sentences.Count - 1);
+                    break;
+                }
+            }
+        }
+
+        var paragraphs = new System.Collections.Generic.List<string>();
+        var current = new System.Collections.Generic.List<string>();
+        foreach (var raw in sentences)
+        {
+            var s = raw.Trim();
+            var firstWord = Regex.Match(s, @"^[A-Za-z]+").Value;
+            bool startsTransition = TransitionWords.Contains(firstWord, StringComparer.OrdinalIgnoreCase);
+            if (current.Count > 0 && (startsTransition || current.Count >= 3))
+            {
+                paragraphs.Add(string.Join(" ", current));
+                current.Clear();
+            }
+            current.Add(s);
+        }
+        if (current.Count > 0) paragraphs.Add(string.Join(" ", current));
+
+        var result = new System.Collections.Generic.List<string>();
+        if (greetingLine != null) result.Add(greetingLine);
+        result.AddRange(paragraphs);
+        if (signOffLine != null) result.Add(signOffLine);
+
+        return result.Count > 0 ? string.Join("\n\n", result) : text;
     }
 
     private static string LoadApiKey()
