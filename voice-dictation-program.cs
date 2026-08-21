@@ -723,7 +723,11 @@ sealed class TrayApp : ApplicationContext
             finally
             {
                 _isRecording = false;
-                HotkeyWindow.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE);
+                // RegisterHotKey/UnregisterHotKey are thread-affine to the window's message
+                // queue — must run on the UI thread, not this background Task.Run thread,
+                // or the OS-level registration silently never releases.
+                try { _overlay.BeginInvoke(new Action(() => HotkeyWindow.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE))); }
+                catch { }
             }
         });
     }
