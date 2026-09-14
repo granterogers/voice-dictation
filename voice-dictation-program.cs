@@ -153,6 +153,8 @@ sealed class SettingsForm : Form
     private readonly CheckBox _chkSounds;
     private readonly TrackBar _trkVolume;
     private readonly Label _lblVolume;
+    private NAudio.Wave.WaveOutEvent _volumePreviewOutput;
+    private NAudio.Wave.AudioFileReader _volumePreviewReader;
     private readonly NumericUpDown _numFont;
     private readonly TextBox _txtPrompt;
     private readonly TrackBar _trkOpacity;
@@ -190,7 +192,7 @@ sealed class SettingsForm : Form
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
-        ClientSize = new Size(520, 648);
+        ClientSize = new Size(520, 662);
 
         var y = 10;
 
@@ -226,9 +228,9 @@ sealed class SettingsForm : Form
             TickFrequency = 10, SmallChange = 5
         };
         _lblVolume = new Label { Location = new Point(384, y + 2), AutoSize = true, Text = _s.SoundVolume + "%" };
-        _trkVolume.ValueChanged += (_, _) => { _lblVolume.Text = _trkVolume.Value + "%"; };
+        _trkVolume.ValueChanged += (_, _) => { _lblVolume.Text = _trkVolume.Value + "%"; PreviewVolume(_trkVolume.Value); };
         Controls.Add(_trkVolume); Controls.Add(_lblVolume);
-        y += 26;
+        y += 40;
 
         Lbl("Start:", 12, y + 2);
         _cmbStart = SndCombo(_s.SoundStart, 60, y); y += 28;
@@ -323,6 +325,31 @@ sealed class SettingsForm : Form
         var btnCancel = new Button { Text = "Cancel", Size = new Size(80, 30), Location = new Point(428, y) };
         btnCancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
         Controls.Add(btnCancel);
+
+        FormClosed += (_, _) => StopVolumePreview();
+    }
+
+    // Restarts the preview sound at the new volume on every slider change, stopping any
+    // still-playing previous preview first so a fast drag doesn't overlap garbled sounds.
+    private void PreviewVolume(int volumePercent)
+    {
+        StopVolumePreview();
+        try
+        {
+            var path = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbStart));
+            if (!File.Exists(path)) return;
+            _volumePreviewReader = new NAudio.Wave.AudioFileReader(path) { Volume = Math.Clamp(volumePercent, 0, 100) / 100f };
+            _volumePreviewOutput = new NAudio.Wave.WaveOutEvent();
+            _volumePreviewOutput.Init(_volumePreviewReader);
+            _volumePreviewOutput.Play();
+        }
+        catch { }
+    }
+
+    private void StopVolumePreview()
+    {
+        try { _volumePreviewOutput?.Stop(); _volumePreviewOutput?.Dispose(); _volumePreviewReader?.Dispose(); } catch { }
+        _volumePreviewOutput = null; _volumePreviewReader = null;
     }
 
     private void RefreshPreview()
