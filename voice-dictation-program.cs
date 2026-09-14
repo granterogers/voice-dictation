@@ -6,7 +6,6 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
-using System.Media;
 using System.Net.Http;
 using System.Linq;
 using System.Net.Http.Headers;
@@ -35,6 +34,29 @@ static class Program
     }
 }
 
+static class SoundPlayback
+{
+    // Fire-and-forget WAV playback with volume control (System.Media.SoundPlayer has no
+    // volume API, so this uses NAudio instead). Each call owns its own reader/output pair,
+    // disposed when playback finishes so overlapping sounds don't step on each other.
+    public static void Play(string path, int volumePercent)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            var reader = new NAudio.Wave.AudioFileReader(path)
+            {
+                Volume = Math.Clamp(volumePercent, 0, 100) / 100f
+            };
+            var output = new NAudio.Wave.WaveOutEvent();
+            output.Init(reader);
+            output.PlaybackStopped += (_, _) => { output.Dispose(); reader.Dispose(); };
+            output.Play();
+        }
+        catch { }
+    }
+}
+
 static class AppVersion
 {
     public static readonly string Current =
@@ -53,6 +75,7 @@ class AppSettings
     public string SoundDone { get; set; } = "Speech Off.wav";
     public string SoundError { get; set; } = "Windows Foreground.wav";
     public bool SoundsEnabled { get; set; } = true;
+    public int SoundVolume { get; set; } = 80;
     public float OverlayFontSize { get; set; } = 10.5f;
     public int OverlayBgR { get; set; } = 24;
     public int OverlayBgG { get; set; } = 24;
@@ -128,6 +151,8 @@ sealed class SettingsForm : Form
     private readonly AppSettings _s;
     private readonly ComboBox _cmbStart, _cmbDone, _cmbError, _cmbDevice;
     private readonly CheckBox _chkSounds;
+    private readonly TrackBar _trkVolume;
+    private readonly Label _lblVolume;
     private readonly NumericUpDown _numFont;
     private readonly TextBox _txtPrompt;
     private readonly TrackBar _trkOpacity;
@@ -191,7 +216,19 @@ sealed class SettingsForm : Form
             Text = "Enable sounds", Checked = _s.SoundsEnabled,
             Location = new Point(12, y), AutoSize = true
         };
-        Controls.Add(_chkSounds); y += 26;
+        Controls.Add(_chkSounds);
+
+        Lbl("Volume:", 160, y + 2);
+        _trkVolume = new TrackBar
+        {
+            Location = new Point(220, y - 2), Size = new Size(160, 30),
+            Minimum = 0, Maximum = 100, Value = _s.SoundVolume,
+            TickFrequency = 10, SmallChange = 5
+        };
+        _lblVolume = new Label { Location = new Point(384, y + 2), AutoSize = true, Text = _s.SoundVolume + "%" };
+        _trkVolume.ValueChanged += (_, _) => { _lblVolume.Text = _trkVolume.Value + "%"; };
+        Controls.Add(_trkVolume); Controls.Add(_lblVolume);
+        y += 26;
 
         Lbl("Start:", 12, y + 2);
         _cmbStart = SndCombo(_s.SoundStart, 60, y); y += 28;
@@ -304,6 +341,7 @@ sealed class SettingsForm : Form
     private void DoSave()
     {
         _s.SoundsEnabled = _chkSounds.Checked;
+        _s.SoundVolume = _trkVolume.Value;
         _s.SoundStart = SelectedWav(_cmbStart);
         _s.SoundDone = SelectedWav(_cmbDone);
         _s.SoundError = SelectedWav(_cmbError);
@@ -366,7 +404,7 @@ sealed class SettingsForm : Form
         btn.Click += (_, _) =>
         {
             var path = Path.Combine(AppSettings.MediaDir, SelectedWav(cmb));
-            try { if (File.Exists(path)) new SoundPlayer(path).Play(); } catch { }
+            SoundPlayback.Play(path, _trkVolume.Value);
         };
         Controls.Add(btn);
         return cmb;
@@ -1010,7 +1048,7 @@ sealed class TrayApp : ApplicationContext
     private void PlaySound(string path)
     {
         if (!_settings.SoundsEnabled) return;
-        try { if (File.Exists(path)) new SoundPlayer(path).Play(); } catch { }
+        SoundPlayback.Play(path, _settings.SoundVolume);
     }
 
     [DllImport("user32.dll")]
