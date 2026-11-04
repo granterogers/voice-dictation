@@ -74,6 +74,18 @@ then `C:\Windows\Media`; absolute paths also work. Both `.wav` and `.mp3` are su
 `sounds\` is gitignored and absent from a fresh clone, so any scheme referencing it
 falls back to the all-Windows "Soft" set automatically.
 
+## Tests
+
+The text formatter is covered by an xUnit suite:
+
+```powershell
+dotnet restore "tests\VoiceDictation.Tests.csproj" --source "https://api.nuget.org/v3/index.json" --source "C:\Users\grant.rogers\.nuget\packages"
+dotnet test "tests\VoiceDictation.Tests.csproj" --no-restore
+```
+
+The tests compile `MessageFormatter.cs` directly rather than referencing the app, so they
+run on plain `net8.0` in under a second.
+
 ## Troubleshooting
 
 `voice-dictation.log`, written next to the exe, records each dictation cycle: every

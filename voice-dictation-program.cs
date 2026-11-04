@@ -1335,7 +1335,7 @@ sealed class TrayApp : ApplicationContext
         string output = !string.IsNullOrWhiteSpace(polished) ? polished : raw;
         try
         {
-            output = EnforceMessageStructure(output);
+            output = MessageFormatter.EnforceMessageStructure(output);
             Log.Write("FORMATTED", JsonSerializer.Serialize(output));
         }
         catch (Exception ex)
@@ -1409,135 +1409,6 @@ sealed class TrayApp : ApplicationContext
             trimmed.Add(line);
         }
         return string.Join('\n', trimmed).TrimEnd();
-    }
-
-    private static readonly string[] SignOffPhrases =
-    {
-        "best wishes", "best regards", "kind regards", "warm regards", "all the best",
-        "many thanks", "thank you so much", "thanks so much", "thank you", "thanks",
-        "sincerely", "cheers", "talk soon", "take care", "regards"
-    };
-
-    private static readonly string[] TransitionWords =
-    {
-        "but", "so", "however", "then", "also", "thereafter", "additionally", "meanwhile"
-    };
-
-    // Deterministic typography cleanup. The AI pass is inconsistent about spacing and
-    // capitalization no matter how the prompt is worded (see HANDOVER.md s8), so these
-    // fixes are applied in code rather than asked for.
-    private static string NormalizeTypography(string text)
-    {
-        text = text.Replace("\r\n", "\n").Replace('\r', '\n');
-
-        // Collapse runs of spaces/tabs, and strip trailing space on each line.
-        text = Regex.Replace(text, @"[ \t]+", " ");
-        text = Regex.Replace(text, @" +$", "", RegexOptions.Multiline);
-
-        // No space BEFORE punctuation; exactly one space AFTER it.
-        text = Regex.Replace(text, @"\s+([,.!?;:])", "$1");
-        text = Regex.Replace(text, @"([,;:])(?=[A-Za-z0-9])", "$1 ");
-        // Sentence punctuation. The lookbehind skips initialisms - a period whose letter
-        // is itself preceded by a word boundary ("u.s.a.", "a.m.") is not a sentence end.
-        text = Regex.Replace(text, @"(?<!\b[A-Za-z])([.!?])(?=[A-Za-z])", "$1 ");
-
-        // Dictation routinely yields a bare lowercase "i".
-        text = Regex.Replace(text, @"(?<![A-Za-z'])i(?![A-Za-z'])", "I");
-
-        // Capitalize the first letter of the text, of every line, and of every sentence.
-        text = Regex.Replace(text, @"^[a-z]", m => m.Value.ToUpperInvariant());
-        text = Regex.Replace(text, @"(?<=\n)([ \t]*)([a-z])",
-            m => m.Groups[1].Value + char.ToUpper(m.Groups[2].Value[0]));
-        text = Regex.Replace(text, @"(?<!\b[A-Za-z])([.!?]\s+)([a-z])",
-            m => m.Groups[1].Value + char.ToUpper(m.Groups[2].Value[0]));
-
-        // Never more than one blank line between paragraphs.
-        text = Regex.Replace(text, @"\n{3,}", "\n\n");
-
-        return text.Trim();
-    }
-
-    // Deterministic fallback formatting so greeting/body/sign-off structure and paragraph
-    // breaks always land, regardless of whether the AI cleanup pass applied them.
-    private static string EnforceMessageStructure(string text)
-    {
-        text = NormalizeTypography(text);
-        if (text.Length == 0) return text;
-
-        string greetingLine = null;
-        var greetingMatch = Regex.Match(text, @"^(Hi|Hey|Hello|Dear|Greetings)\s+([A-Za-z][A-Za-z'-]{0,30})\s*[,.!]?\s*", RegexOptions.IgnoreCase);
-        if (greetingMatch.Success)
-        {
-            var salutation = greetingMatch.Groups[1].Value;
-            var name = greetingMatch.Groups[2].Value;
-            greetingLine = $"{char.ToUpper(salutation[0])}{salutation.Substring(1).ToLower()} {char.ToUpper(name[0])}{name.Substring(1)},";
-            text = text.Substring(greetingMatch.Length).TrimStart();
-            if (text.Length > 0 && char.IsLower(text[0]))
-                text = char.ToUpper(text[0]) + text.Substring(1);
-        }
-
-        // Peel the sign-off off the tail BEFORE paragraphing, so it never gets glued
-        // onto the last body paragraph.
-        string signOffLine = null;
-        var tailMatch = Regex.Match(text, @"(?:^|(?<=[.!?])\s+|\n)\s*([A-Za-z][A-Za-z ]*?)\s*[,.!]?\s*(?:\n+\s*([A-Z][A-Za-z'-]{1,20}(?: [A-Z][A-Za-z'-]{1,20})?)\s*[.!]?)?\s*$");
-        if (tailMatch.Success)
-        {
-            var candidate = tailMatch.Groups[1].Value.Trim();
-            foreach (var phrase in SignOffPhrases)
-            {
-                if (!candidate.Equals(phrase, StringComparison.OrdinalIgnoreCase)) continue;
-                var head = $"{char.ToUpper(candidate[0])}{candidate.Substring(1).ToLower()}";
-                var name = tailMatch.Groups[2].Success ? tailMatch.Groups[2].Value.Trim() : "";
-                signOffLine = name.Length > 0 ? $"{head},\n{name}" : $"{head}.";
-                text = text.Substring(0, tailMatch.Index).TrimEnd();
-                break;
-            }
-        }
-
-        // Respect the paragraph breaks the AI pass already produced — the previous
-        // version flattened them with string.Join(" ", ...) and re-split from scratch,
-        // which is why well-structured output kept coming back as one block.
-        var paragraphs = new System.Collections.Generic.List<string>();
-        foreach (var block in Regex.Split(text, @"\n\s*\n"))
-        {
-            var flat = Regex.Replace(block.Replace('\n', ' '), @"\s+", " ").Trim();
-            if (flat.Length == 0) continue;
-            paragraphs.AddRange(SplitIntoParagraphs(flat));
-        }
-
-        var result = new System.Collections.Generic.List<string>();
-        if (greetingLine != null) result.Add(greetingLine);
-        result.AddRange(paragraphs);
-        if (signOffLine != null) result.Add(signOffLine);
-
-        return result.Count > 0 ? string.Join("\n\n", result) : text;
-    }
-
-    // Breaks one dense block into paragraphs of at most 3 sentences, starting a new
-    // one at any transition word.
-    private static System.Collections.Generic.List<string> SplitIntoParagraphs(string block)
-    {
-        // Same initialism guard as NormalizeTypography, shifted one char: do not treat
-        // the trailing period of "u.s.a." as a sentence boundary.
-        var sentences = Regex.Split(block, @"(?<!\b[A-Za-z]\.)(?<=[.!?])\s+")
-            .Where(x => x.Trim().Length > 0).ToList();
-        var paragraphs = new System.Collections.Generic.List<string>();
-        var current = new System.Collections.Generic.List<string>();
-
-        foreach (var raw in sentences)
-        {
-            var sentence = raw.Trim();
-            var firstWord = Regex.Match(sentence, @"^[A-Za-z]+").Value;
-            bool startsTransition = TransitionWords.Contains(firstWord, StringComparer.OrdinalIgnoreCase);
-            if (current.Count > 0 && (startsTransition || current.Count >= 3))
-            {
-                paragraphs.Add(string.Join(" ", current));
-                current.Clear();
-            }
-            current.Add(sentence);
-        }
-        if (current.Count > 0) paragraphs.Add(string.Join(" ", current));
-        return paragraphs;
     }
 
     private static string LoadApiKey()

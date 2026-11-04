@@ -18,6 +18,12 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
+  <!-- The SDK globs **/*.cs, which would otherwise pull the test sources into the app. -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
   <Target Name="SetVersionFromGitTag" BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo">
     <!-- Tags pointing at HEAD, newest-version-first; falls back to the nearest reachable tag. -->
     <Exec Command="git tag --points-at HEAD --sort=-v:refname" ConsoleToMSBuild="true" StandardOutputImportance="low" ContinueOnError="true" WorkingDirectory="$(MSBuildProjectDirectory)">

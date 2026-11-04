@@ -185,11 +185,37 @@ Fuller detail in `HANDOVER.md` §9 and §12.
 
 ## 9. Testing
 
-There are no automated tests. Verification is manual and empirical:
+### The formatter has a test suite — run it
 
-- Pure functions (the text formatter) are checked by generating a throwaway console app in
-  the scratchpad that includes the real methods from source and runs them over real failing
-  examples. Do this rather than reasoning about regexes — it has caught real bugs.
-- Anything touching the OS (hotkeys, z-order, audio) needs a live probe or the trace log.
+```powershell
+# dotnet test has no --source switch, and NuGet.config (§3) means restore cannot be
+# skipped, so restore explicitly first. Only needed when packages change.
+dotnet restore "tests\VoiceDictation.Tests.csproj" `
+  --source "https://api.nuget.org/v3/index.json" `
+  --source "C:\Users\grant.rogers\.nuget\packages"
+
+dotnet test "tests\VoiceDictation.Tests.csproj" --no-restore
+```
+
+xUnit, ~20 cases, runs in well under a second. **Run it after any change to
+`MessageFormatter.cs`.** It already caught two live bugs the moment it was written.
+
+`MessageFormatter.cs` is deliberately a separate top-level file, free of WinForms, NAudio
+and network dependencies. The test project **compiles that exact source file** via
+`<Compile Include="..\MessageFormatter.cs" Link="..." />` rather than referencing the app
+assembly — the app is a self-contained `WinExe` pinned to `win-x64`, which a plain
+`net8.0` test project cannot reference. There is only one copy of the logic.
+
+The app project excludes `tests/**` from its glob (§3's csproj). If you add source files
+under `tests/`, they stay out of the app automatically; do not remove that exclusion.
+
+Cases are drawn from dictation output that actually broke, and the `Regression_*` tests
+each name the bug they lock down. When you fix a formatter bug, add the failing input as
+a `Regression_*` case first.
+
+### Everything else is still manual
+
+- Anything touching the OS (hotkeys, z-order, audio, tray) needs a live probe or the trace
+  log (§6). `HANDOVER.md` §9.1 documents the `RegisterHotKey` probe technique.
 - Sound and icon changes need the user's eyes and ears. Render icon options and show them
   before committing to one.
