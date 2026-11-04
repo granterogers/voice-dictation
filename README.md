@@ -1,6 +1,7 @@
-> **AI assistants:** Read `AGENTS.md` in full before making any changes to
-> this project. It contains workflow rules, deploy script requirements, and
-> presentation preferences that must be followed.
+> **AI assistants:** Read `AGENTS.md` in full before making any changes to this
+> project. It is the single canonical instruction set — workflow, build commands,
+> secret-handling rules, and the architecture traps that have already caused bugs.
+> `HANDOVER.md` has the engineering history behind it.
 
 # Voice Dictation
 

@@ -17,7 +17,14 @@ the cursor via Ctrl+V.
 - Local working copy: `C:\Users\grant.rogers\My Apps\DEV\voice-dictation`
 - Runtime API key: `groq_key.txt`, plain text, one line, sits next to the built exe (see §6)
 
-## 2. ⚠️ Two conflicting workflows exist in this repo — resolve before continuing
+## 2. ~~⚠️ Two conflicting workflows exist in this repo — resolve before continuing~~
+
+> **RESOLVED 2026-11-04 — this section is kept for history only.**
+> `AGENTS.md` is now the single canonical instruction set and describes the git workflow
+> that is actually in use. `CLAUDE_PROMPT.md` is a stub pointing at it. `NuGet.config` is
+> **kept deliberately** (the user's decision), so the `--source` flags in §3 are permanent,
+> not a workaround. `deploy.py` is retained at the user's request but is dead — never run
+> or regenerate it. See `AGENTS.md` §7. The "open decision" below no longer applies.
 
 The repo contains **two different, incompatible process documents**, and recent work has not
 followed either consistently. Whoever picks this up next should reconcile them; don't just pick
@@ -363,8 +370,14 @@ pixels, so outlined designs go grey rather than merely small. `LoadMicIcon()` an
 
 ### 12.8 Still open
 
-- Section 2's two-conflicting-workflows question is **still unresolved**. Direct
-  `git commit` + `git push` to `main` remains what actually happens.
+- ~~Section 2's two-conflicting-workflows question.~~ **Resolved** — `AGENTS.md` is now
+  canonical and documents the git workflow. See the banner on §2.
+- **A GitHub Personal Access Token is committed in `deploy.py` (line 7) and this repo is
+  public.** It has been exposed since 2026-05-13. The user chose to leave the file in
+  place, so the only remediation is **revoking the token** at
+  `github.com/settings/tokens`. Removing the file would not undo the exposure — it is in
+  git history. Confirm with the user whether the token has been revoked before treating
+  this as closed.
 - `NuGet.config` is still pinned to the local cache (user chose to keep it), so every
   build still needs the `--source` flags from section 3.
 - The three build warnings (`CS8632`, `CS0219 hasLivePreview`, `CS0414 _stopRequested`)
