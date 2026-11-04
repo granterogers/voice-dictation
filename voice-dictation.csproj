@@ -3,6 +3,9 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Annotations only: makes `Type?` legal (silencing CS8632) without turning on the
+         nullable *warnings*, which this file was never written against. -->
+    <Nullable>annotations</Nullable>
     <AssemblyName>VoiceDictation</AssemblyName>
     <RootNamespace>VoiceDictation</RootNamespace>
     <PublishSingleFile>true</PublishSingleFile>

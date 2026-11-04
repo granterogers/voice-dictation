@@ -934,7 +934,6 @@ sealed class TrayApp : ApplicationContext
     private AppSettings _settings;
 
     private volatile bool _isRecording;
-    private volatile bool _stopRequested;
     private volatile bool _cancelRequested;
     // The done sound has two possible trigger points (manual Win+\ stop, and end of
     // pipeline). Only one of them should ever be heard per dictation cycle.
@@ -1132,7 +1131,6 @@ sealed class TrayApp : ApplicationContext
 
             case DictationPhase.Capturing:
                 Log.Write("TOGGLE", "stop requested while capturing");
-                _stopRequested = true;
                 _activeRecorder?.StopNow();
                 PlayDoneOnce();
                 break;
@@ -1150,7 +1148,6 @@ sealed class TrayApp : ApplicationContext
     private void StartDictation()
     {
         _isRecording = true;
-        _stopRequested = false;
         _cancelRequested = false;
         _donePlayed = false;
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
@@ -1211,9 +1208,6 @@ sealed class TrayApp : ApplicationContext
         // Best live text we have so far (accumulates across preview calls)
         string liveText = "";
 
-        // True once we've fired at least one successful live preview
-        bool hasLivePreview = false;
-
         // Whether a live-preview transcription is currently in flight
         bool previewInFlight = false;
 
@@ -1263,8 +1257,6 @@ sealed class TrayApp : ApplicationContext
                         if (!string.IsNullOrWhiteSpace(t))
                         {
                             liveText = t;
-                            hasLivePreview = true;
-                            // Show the live text and update status to make it clear it's a preview
                             _overlay.SetText(liveText);
                             _overlay.SetStatus("\U0001F3A4 Listening...");
                         }
