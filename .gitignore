@@ -1,0 +1,9 @@
+# Build output
+bin/
+obj/
+
+
+# Extracted Claude desktop SFX (Anthropic assets) + local trace log - never commit
+sounds/
+voice-dictation.log
+

@@ -265,3 +265,109 @@ that a fresh session/tool won't see unless told:
 
 If picking this up in a tool without access to that memory store, treat the three bullets above as
 still-active standing instructions from the user.
+
+---
+
+## 12. Update — 2026-11-04 session
+
+Changes since this document was first written. Where this section conflicts with
+anything above, this section is correct.
+
+### 12.1 The chat model was dead (root cause of two separate bug reports)
+
+`llama-3.3-70b-versatile` has been **decommissioned by Groq** and returns `404` — it is
+no longer in the account's `/v1/models` list at all. Because `Polish()` catches its own
+exceptions and degrades to raw Whisper text, the only visible symptom was an unexplained
+"system chime" after each dictation (that chime was `Windows Foreground.wav`, the *error*
+sound) plus text that was never actually cleaned up. Two user-reported bugs, one cause.
+
+- Now on **`openai/gpt-oss-120b`** (131k context), verified against the real `PolishPrompt`
+  before being wired in.
+- **Section 8 above is now suspect.** Its claim that prompt-only formatting "failed
+  reliably" was established on a model that no longer exists; `gpt-oss-120b` honours the
+  structure rules from that same prompt. `EnforceMessageStructure()` may now be
+  belt-and-braces rather than load-bearing. Do not delete it without testing, but do not
+  treat section 8 as settled either.
+- Whisper (`whisper-large-v3-turbo`) was never affected.
+
+### 12.2 There is now a trace log
+
+`voice-dictation.log`, written next to the exe (gitignored). Records cycle boundaries,
+every sound with the line that triggered it, mode, and `RAW` -> `POLISHED` -> `FORMATTED`
+as JSON-escaped strings. It never records the API key. This log is what found 12.1 — it
+turned a three-way guess into one line. Reach for it first.
+
+`SoundPlayback.Play` no longer swallows exceptions silently; failures log `SOUND-FAILED`.
+That matters now that MP3s are in play, since NAudio resolves an MP3 decoder at runtime
+and a failure would otherwise be indistinguishable from sounds being switched off.
+
+### 12.3 Dictation can be started and stopped by mouse
+
+Left-clicking the tray icon toggles dictation (right-click still opens the menu).
+`ToggleDictation()` is the single entry point for both the hotkey and the click, and
+**must be called on the UI thread** — it registers the Escape hotkey, which is
+thread-affine (see 9.1).
+
+Three phases are now modelled explicitly (`DictationPhase`): `Idle`, `Capturing`
+(`_activeRecorder != null`) and `Processing` (audio in flight to Groq).
+
+**Click-started dictation is manual-stop**: silence auto-stop is disabled, because the
+2s auto-stop would end the cycle before the user's second click, which then landed in
+`Idle` and started a *new* recording. `Win+\` keeps the original auto-stop behaviour.
+A 15s idle timeout (`MANUAL_IDLE_TIMEOUT_SEC`) abandons a click-started cycle in which
+no speech was ever detected, so a stray click cannot pin the overlay open for 120s.
+
+### 12.4 Whisper hallucinates on silence
+
+Near-silent audio makes Whisper emit confident filler — most often
+`"ご視聴ありがとうございました"` ("thanks for watching"). The old `finalWav.Length < 10000`
+guard cannot catch it, since a *long* silent recording passes easily. Now gated on
+`AudioRecorder.SpeechDetected`, which reuses the existing per-chunk `SILENCE_THRESHOLD`.
+
+### 12.5 Overlay
+
+Smaller (380x124), 75% opacity, drawn on the monitor under the cursor
+(`Screen.FromPoint`) rather than always the primary one — that was why it often looked
+absent. Topmost is re-asserted on a 400ms timer via `SetWindowPos`, because
+`WS_EX_NOACTIVATE` makes `BringToFront()` inert and WinForms treats re-setting
+`TopMost = true` as a no-op after the OS has demoted the window.
+
+- **Click the body = finished speaking** (stop, clean up, paste).
+- **Click the X = cancel** (discard, paste nothing), same as Escape.
+- Child `Label`/`Panel` clicks do not bubble to the `Form`, so each surface is wired
+  individually.
+- `TailFit()` shows the last ~260 chars, because a top-aligned Label clips the *end* —
+  i.e. the words just spoken. The clipboard always gets the full text.
+
+### 12.6 Sounds
+
+Sound names resolve against `sounds\` (next to the exe) first, then `C:\Windows\Media`;
+absolute paths are honoured. Settings has a **Scheme** dropdown with a Preview button,
+built from presets chosen by measuring duration and RMS of all 70 WAVs in
+`C:\Windows\Media`. The old defaults were among the longest in the folder
+(`Windows Foreground.wav` = 2.11s).
+
+> **Licensing.** The default "Claude" scheme uses MP3s extracted from the installed
+> Claude desktop app (`resources\ion-dist.asar`). These are **Anthropic's assets**. They
+> live in `sounds\`, which is **gitignored, and must never be committed** — this repo is
+> public. `ResolveSound()` falls back to the all-Windows "Soft" scheme when they are
+> absent, so a fresh clone is quiet-but-working rather than silent.
+
+### 12.7 Icon
+
+Both tray icons are drawn by `DrawMicIcon(Color)` — a solid rounded-square badge with a
+white microphone knocked out, blue `#3884FF` idle and red `#EB3838` recording. Filled
+shapes survive the drop to 16px; antialiasing turns a 1px stroke into two half-lit
+pixels, so outlined designs go grey rather than merely small. `LoadMicIcon()` and the
+`shell32.dll` `ExtractIcon` P/Invoke are gone.
+
+### 12.8 Still open
+
+- Section 2's two-conflicting-workflows question is **still unresolved**. Direct
+  `git commit` + `git push` to `main` remains what actually happens.
+- `NuGet.config` is still pinned to the local cache (user chose to keep it), so every
+  build still needs the `--source` flags from section 3.
+- The three build warnings (`CS8632`, `CS0219 hasLivePreview`, `CS0414 _stopRequested`)
+  are still present.
+- Still no automated tests. The formatter was verified with a throwaway console harness
+  against six cases; that harness is not committed.

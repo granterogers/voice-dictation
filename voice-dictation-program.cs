@@ -34,6 +34,26 @@ static class Program
     }
 }
 
+// Diagnostic trace, written next to the exe. Deliberately never records API keys or
+// credentials - only pipeline stage names, sound file names, and transcript text.
+static class Log
+{
+    private static readonly object Gate = new object();
+    public static readonly string Path =
+        System.IO.Path.Combine(AppContext.BaseDirectory, "voice-dictation.log");
+
+    public static void Write(string stage, string detail = "")
+    {
+        try
+        {
+            lock (Gate)
+                File.AppendAllText(Path,
+                    $"{DateTime.Now:HH:mm:ss.fff}  {stage}{(detail.Length > 0 ? "  |  " + detail : "")}{Environment.NewLine}");
+        }
+        catch { }
+    }
+}
+
 static class SoundPlayback
 {
     // Fire-and-forget WAV playback with volume control (System.Media.SoundPlayer has no
@@ -43,7 +63,7 @@ static class SoundPlayback
     {
         try
         {
-            if (!File.Exists(path)) return;
+            if (!File.Exists(path)) { Log.Write("SOUND-MISSING", path); return; }
             var reader = new NAudio.Wave.AudioFileReader(path)
             {
                 Volume = Math.Clamp(volumePercent, 0, 100) / 100f
@@ -53,7 +73,10 @@ static class SoundPlayback
             output.PlaybackStopped += (_, _) => { output.Dispose(); reader.Dispose(); };
             output.Play();
         }
-        catch { }
+        // Swallowing this used to mean a sound that silently never played — with MP3
+        // in the mix (which needs a decoder NAudio resolves at runtime) that would be
+        // indistinguishable from sounds being switched off.
+        catch (Exception ex) { Log.Write("SOUND-FAILED", $"{Path.GetFileName(path)}: {ex.GetType().Name}: {ex.Message}"); }
     }
 }
 
@@ -71,16 +94,35 @@ static class AppVersion
 
 class AppSettings
 {
-    public string SoundStart { get; set; } = "Speech On.wav";
-    public string SoundDone { get; set; } = "Speech Off.wav";
-    public string SoundError { get; set; } = "Windows Foreground.wav";
+    public string SoundStart { get; set; } = "enter_voice_mode.mp3";
+    public string SoundDone { get; set; } = "exit_voice_mode.mp3";
+    public string SoundError { get; set; } = "disconnected.mp3";
     public bool SoundsEnabled { get; set; } = true;
-    public int SoundVolume { get; set; } = 80;
+    public int SoundVolume { get; set; } = 60;
+    public string SoundScheme { get; set; } = "Claude";
+
+    // Curated presets. Chosen by measuring every WAV in C:\Windows\Media for duration
+    // and RMS level, then picking short + quiet combinations; the defaults above were
+    // 0.84s/1.07s/2.11s, which is why the old set felt loud and drawn out. Each scheme
+    // pairs a lighter "start" against a slightly more settled "done" so the two stay
+    // distinguishable even at low volume.
+    public static readonly (string Name, string Start, string Done, string Error)[] SoundSchemes =
+    {
+        // name        start                           done                       error
+        // Claude's own voice-mode SFX, extracted from the installed desktop app into
+        // sounds\. Local use only — these are Anthropic assets, never commit them.
+        ("Claude",    "enter_voice_mode.mp3",         "exit_voice_mode.mp3",      "disconnected.mp3"),
+        ("Minimal",   "Windows Navigation Start.wav", "Windows Menu Command.wav", "Windows Information Bar.wav"),
+        ("Soft",      "Windows Feed Discovered.wav",  "ding.wav",                 "Windows Pop-up Blocked.wav"),
+        ("Crisp",     "Windows Startup.wav",          "Windows Recycle.wav",      "Windows Error.wav"),
+        ("Window",    "Windows Restore.wav",          "Windows Minimize.wav",     "Windows Recycle.wav"),
+        ("Classic",   "Speech On.wav",                "Speech Off.wav",           "Windows Foreground.wav"),
+    };
     public float OverlayFontSize { get; set; } = 10.5f;
     public int OverlayBgR { get; set; } = 24;
     public int OverlayBgG { get; set; } = 24;
     public int OverlayBgB { get; set; } = 28;
-    public int OverlayOpacity { get; set; } = 95;
+    public int OverlayOpacity { get; set; } = 75;
     public int TextColorR { get; set; } = 230;
     public int TextColorG { get; set; } = 230;
     public int TextColorB { get; set; } = 230;
@@ -106,13 +148,37 @@ class AppSettings
     public static readonly string MediaDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Media");
 
+    // Sounds shipped next to the exe. Not committed to the repo — see .gitignore.
+    public static readonly string LocalSoundsDir = Path.Combine(AppContext.BaseDirectory, "sounds");
+
+    // The default scheme points at files in sounds\, which is gitignored — so on a
+    // fresh clone they are absent. Rather than going silently mute, fall back to this
+    // all-Windows scheme, which exists on every machine.
+    private static readonly (string Start, string Done, string Error) FallbackScheme =
+        ("Windows Feed Discovered.wav", "ding.wav", "Windows Pop-up Blocked.wav");
+
+    // A stored sound is either an absolute path, a file in sounds\, or a Windows media
+    // name. Checking sounds\ first lets a scheme reference a bundled file by bare name.
+    private static string Locate(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        if (Path.IsPathRooted(name)) return File.Exists(name) ? name : null;
+        var local = Path.Combine(LocalSoundsDir, name);
+        if (File.Exists(local)) return local;
+        var media = Path.Combine(MediaDir, name);
+        return File.Exists(media) ? media : null;
+    }
+
+    private static string ResolveSound(string name, string fallback) =>
+        Locate(name) ?? Locate(fallback) ?? "";
+
     public Color OverlayBgColor => Color.FromArgb(OverlayBgR, OverlayBgG, OverlayBgB);
     public Color TextColor => Color.FromArgb(TextColorR, TextColorG, TextColorB);
     public Color StatusColor => Color.FromArgb(StatusColorR, StatusColorG, StatusColorB);
 
-    public string SoundStartPath => Path.Combine(MediaDir, SoundStart);
-    public string SoundDonePath => Path.Combine(MediaDir, SoundDone);
-    public string SoundErrorPath => Path.Combine(MediaDir, SoundError);
+    public string SoundStartPath => ResolveSound(SoundStart, FallbackScheme.Start);
+    public string SoundDonePath => ResolveSound(SoundDone, FallbackScheme.Done);
+    public string SoundErrorPath => ResolveSound(SoundError, FallbackScheme.Error);
 
     private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
     private static string SettingsPathAlt => Path.Combine(Directory.GetCurrentDirectory(), "settings.json");
@@ -149,7 +215,11 @@ class AppSettings
 sealed class SettingsForm : Form
 {
     private readonly AppSettings _s;
-    private readonly ComboBox _cmbStart, _cmbDone, _cmbError, _cmbDevice;
+    private const string CUSTOM_SCHEME = "Custom";
+    private readonly ComboBox _cmbStart, _cmbDone, _cmbError, _cmbDevice, _cmbScheme;
+    // Set while ApplyScheme() drives the three sound combos, so their change handlers
+    // don't immediately flip the scheme back to "Custom".
+    private bool _applyingScheme;
     private readonly CheckBox _chkSounds;
     private readonly TrackBar _trkVolume;
     private readonly Label _lblVolume;
@@ -187,12 +257,27 @@ sealed class SettingsForm : Form
             _wavNames = Array.Empty<string>();
         }
 
+        // Sounds shipped beside the exe (sounds\) are offered alongside the Windows ones.
+        // Listed first so they are easy to find; AppSettings resolves a bare filename
+        // against this folder before falling back to C:\Windows\Media.
+        if (Directory.Exists(AppSettings.LocalSoundsDir))
+        {
+            var local = Directory.GetFiles(AppSettings.LocalSoundsDir)
+                .Where(f => f.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)
+                         || f.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
+                .Select(Path.GetFileName)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (local.Length > 0)
+                _wavNames = local.Concat(_wavNames).ToArray();
+        }
+
         Text = $"Voice Dictation — Settings ({AppVersion.Current})";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
-        ClientSize = new Size(520, 662);
+        ClientSize = new Size(520, 694);
 
         var y = 10;
 
@@ -231,6 +316,23 @@ sealed class SettingsForm : Form
         _trkVolume.ValueChanged += (_, _) => { _lblVolume.Text = _trkVolume.Value + "%"; PreviewVolume(_trkVolume.Value); };
         Controls.Add(_trkVolume); Controls.Add(_lblVolume);
         y += 40;
+
+        Lbl("Scheme:", 12, y + 2);
+        _cmbScheme = new ComboBox
+        {
+            Location = new Point(60, y), Size = new Size(170, 24),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _cmbScheme.Items.Add(CUSTOM_SCHEME);
+        foreach (var s in AppSettings.SoundSchemes) _cmbScheme.Items.Add(s.Name);
+        _cmbScheme.SelectedItem = _cmbScheme.Items.Contains(_s.SoundScheme) ? _s.SoundScheme : CUSTOM_SCHEME;
+        _cmbScheme.SelectedIndexChanged += (_, _) => ApplyScheme();
+        Controls.Add(_cmbScheme);
+
+        var btnPreviewScheme = new Button { Text = "Preview", Size = new Size(80, 25), Location = new Point(240, y - 1) };
+        btnPreviewScheme.Click += (_, _) => PreviewScheme();
+        Controls.Add(btnPreviewScheme);
+        y += 30;
 
         Lbl("Start:", 12, y + 2);
         _cmbStart = SndCombo(_s.SoundStart, 60, y); y += 28;
@@ -329,6 +431,53 @@ sealed class SettingsForm : Form
         FormClosed += (_, _) => StopVolumePreview();
     }
 
+    // Drives the three sound combos from the selected preset. Selecting "Custom" leaves
+    // whatever is already chosen alone, so it never clobbers a hand-picked combination.
+    private void ApplyScheme()
+    {
+        var name = _cmbScheme.SelectedItem as string;
+        if (string.IsNullOrEmpty(name) || name == CUSTOM_SCHEME) return;
+
+        foreach (var s in AppSettings.SoundSchemes)
+        {
+            if (s.Name != name) continue;
+            _applyingScheme = true;
+            try
+            {
+                SelectWav(_cmbStart, s.Start);
+                SelectWav(_cmbDone, s.Done);
+                SelectWav(_cmbError, s.Error);
+            }
+            finally { _applyingScheme = false; }
+            PreviewScheme();
+            return;
+        }
+    }
+
+    // SndCombo stores display names without the .wav extension, so match on that.
+    private static void SelectWav(ComboBox cmb, string wavName)
+    {
+        var target = Path.GetFileNameWithoutExtension(wavName);
+        for (int i = 0; i < cmb.Items.Count; i++)
+        {
+            if (string.Equals(cmb.Items[i] as string, target, StringComparison.OrdinalIgnoreCase))
+            { cmb.SelectedIndex = i; return; }
+        }
+    }
+
+    // Plays start then done back to back so a scheme can be judged as a pair.
+    private void PreviewScheme()
+    {
+        StopVolumePreview();
+        var vol = _trkVolume.Value;
+        var start = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbStart));
+        var done = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbDone));
+        SoundPlayback.Play(start, vol);
+        var t = new System.Windows.Forms.Timer { Interval = 900 };
+        t.Tick += (_, _) => { t.Stop(); t.Dispose(); SoundPlayback.Play(done, vol); };
+        t.Start();
+    }
+
     // Restarts the preview sound at the new volume on every slider change, stopping any
     // still-playing previous preview first so a fast drag doesn't overlap garbled sounds.
     private void PreviewVolume(int volumePercent)
@@ -369,6 +518,7 @@ sealed class SettingsForm : Form
     {
         _s.SoundsEnabled = _chkSounds.Checked;
         _s.SoundVolume = _trkVolume.Value;
+        _s.SoundScheme = _cmbScheme.SelectedItem as string ?? CUSTOM_SCHEME;
         _s.SoundStart = SelectedWav(_cmbStart);
         _s.SoundDone = SelectedWav(_cmbDone);
         _s.SoundError = SelectedWav(_cmbError);
@@ -421,6 +571,14 @@ sealed class SettingsForm : Form
         }
         if (cmb.Items.Count > 0)
             cmb.SelectedIndex = Math.Max(selIdx, 0);
+
+        // Hand-picking any individual sound means the selection no longer matches a
+        // preset, so drop the scheme to "Custom" — unless ApplyScheme is driving us.
+        cmb.SelectedIndexChanged += (_, _) =>
+        {
+            if (_applyingScheme || _cmbScheme == null) return;
+            _cmbScheme.SelectedItem = CUSTOM_SCHEME;
+        };
         Controls.Add(cmb);
 
         var btn = new Button
@@ -468,6 +626,14 @@ sealed class OverlayForm : Form
     private readonly Label _statusLabel;
     private readonly Label _textLabel;
     private readonly Panel _panel;
+    private readonly Button _btnClose;
+
+    // X clicked: abandon the cycle and paste nothing, exactly like Escape.
+    public event Action CloseClicked;
+
+    // Body clicked: the user has finished speaking — stop the mic and process what
+    // was captured, same as a second tray click.
+    public event Action BodyClicked;
 
     public OverlayForm(AppSettings s)
     {
@@ -475,7 +641,7 @@ sealed class OverlayForm : Form
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(440, 180);
+        Size = new Size(380, 124);
         try { int pref = 2; DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int)); } catch { }
 
         _panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 12, 16, 12) };
@@ -494,14 +660,72 @@ sealed class OverlayForm : Form
             AutoSize = false, TextAlign = ContentAlignment.TopLeft, Text = ""
         };
 
+        _btnClose = new Button
+        {
+            Text = "✕",
+            Size = new Size(28, 28),
+            Location = new Point(Width - 36, 6),
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+            TabStop = false,
+            Cursor = Cursors.Hand
+        };
+        _btnClose.FlatAppearance.BorderSize = 0;
+        _btnClose.FlatAppearance.MouseOverBackColor = Color.FromArgb(200, 60, 60);
+        _btnClose.Click += (_, _) => CloseClicked?.Invoke();
+
         _panel.Controls.Add(_textLabel);
         _panel.Controls.Add(_statusLabel);
+        Controls.Add(_btnClose);
         Controls.Add(_panel);
+        _btnClose.BringToFront();
+
+        // Clicking the body means "I've finished speaking". A Click on a child Label or
+        // Panel does not bubble to the Form, so every visible surface is wired
+        // individually. The X button is deliberately excluded — it cancels instead.
+        foreach (var c in new Control[] { this, _panel, _statusLabel, _textLabel })
+        {
+            c.Cursor = Cursors.Hand;
+            c.Click += (_, _) => BodyClicked?.Invoke();
+        }
+
         ApplyColors(s);
+
+        // WS_EX_NOACTIVATE means BringToFront() can't lift us above other apps, and any
+        // app going full-screen (or another topmost window appearing) silently drops us
+        // out of the topmost band. Re-assert the z-order on a timer while visible.
+        _topmostTimer = new System.Windows.Forms.Timer { Interval = 400 };
+        _topmostTimer.Tick += (_, _) => AssertTopmost();
     }
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+
+    private readonly System.Windows.Forms.Timer _topmostTimer;
+
+    // Push the window back into the topmost band without stealing focus. Setting
+    // TopMost alone is not enough — WinForms treats it as a no-op when the property
+    // is already true, even after the OS has demoted the window.
+    private void AssertTopmost()
+    {
+        if (!Visible || !IsHandleCreated) return;
+        try
+        {
+            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        catch { }
+    }
 
     public void ApplyColors(AppSettings s)
     {
@@ -511,6 +735,8 @@ sealed class OverlayForm : Form
         Opacity = s.OverlayOpacity / 100.0;
         _statusLabel.ForeColor = s.StatusColor;
         _statusLabel.Font = new Font("Segoe UI", Math.Max(s.OverlayFontSize - 1.5f, 8f), FontStyle.Bold);
+        _btnClose.BackColor = s.OverlayBgColor;
+        _btnClose.ForeColor = s.TextColor;
         _textLabel.ForeColor = s.TextColor;
         _textLabel.Font = new Font("Segoe UI", s.OverlayFontSize);
     }
@@ -520,28 +746,52 @@ sealed class OverlayForm : Form
         if (InvokeRequired) { Invoke(() => ShowOverlay(status)); return; }
         _statusLabel.Text = status;
         _textLabel.Text = "";
-        var wa = Screen.PrimaryScreen!.WorkingArea;
+
+        // Show on the monitor the user is actually working on, not always the primary
+        // one — otherwise the overlay renders off on another display and looks absent.
+        var screen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen!;
+        var wa = screen.WorkingArea;
         Left = wa.Right - Width - 12;
         Top = wa.Bottom - Height - 12;
+
+        TopMost = true;
         Show();
-        BringToFront();
+        AssertTopmost();
+        _topmostTimer.Start();
+    }
+
+    // Roughly what fits in the smaller overlay at the default font.
+    private const int MAX_PREVIEW_CHARS = 260;
+
+    // A top-aligned Label clips the END of long text, which in a live preview hides the
+    // words just spoken. Show the tail instead; the clipboard still gets the full text.
+    private static string TailFit(string text)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length <= MAX_PREVIEW_CHARS) return text;
+        var tail = text.Substring(text.Length - MAX_PREVIEW_CHARS);
+        var space = tail.IndexOf(' ');
+        if (space > 0 && space < 40) tail = tail.Substring(space + 1);
+        return "… " + tail;
     }
 
     public void SetText(string text)
     {
         if (InvokeRequired) { Invoke(() => SetText(text)); return; }
-        _textLabel.Text = text;
+        _textLabel.Text = TailFit(text);
+        AssertTopmost();
     }
 
     public void SetStatus(string status)
     {
         if (InvokeRequired) { Invoke(() => SetStatus(status)); return; }
         _statusLabel.Text = status;
+        AssertTopmost();
     }
 
     public void HideOverlay()
     {
         if (InvokeRequired) { Invoke(() => HideOverlay()); return; }
+        _topmostTimer.Stop();
         Hide();
     }
 
@@ -573,7 +823,8 @@ sealed class AudioRecorder : IDisposable
     private readonly MemoryStream _ms;
     private readonly WaveFileWriter _writer;
     private readonly ManualResetEventSlim _done = new(false);
-    private bool _speechStarted;
+    private readonly bool _autoStopOnSilence;
+    private volatile bool _speechStarted;
     private double _silenceAccum;
     private DateTime _startTime;
     private int _totalBytesWritten;
@@ -582,13 +833,21 @@ sealed class AudioRecorder : IDisposable
     public bool IsFinished => _done.IsSet;
     public int TotalBytesWritten { get { lock (_lock) return _totalBytesWritten; } }
 
+    // True once any chunk exceeded SILENCE_THRESHOLD. Whisper hallucinates confident
+    // filler ("thanks for watching", often in another language) when fed near-silence,
+    // so the pipeline uses this to discard a recording that never contained speech.
+    public bool SpeechDetected => _speechStarted;
+
     // ---- NEW: snapshot of bytes written at last chunk boundary ----
     private int _bytesAtLastChunk = 0;
     public int BytesSinceLastChunk { get { lock (_lock) return _totalBytesWritten - _bytesAtLastChunk; } }
     public void MarkChunkSent() { lock (_lock) _bytesAtLastChunk = _totalBytesWritten; }
 
-    public AudioRecorder(int deviceIndex = -1)
+    // autoStopOnSilence: when false the mic runs until StopNow() (or the hard cap).
+    // Click-to-toggle dictation uses false so the second click is what ends it.
+    public AudioRecorder(int deviceIndex = -1, bool autoStopOnSilence = true)
     {
+        _autoStopOnSilence = autoStopOnSilence;
         _ms = new MemoryStream();
         var fmt = new WaveFormat(SAMPLE_RATE, 16, 1);
         _writer = new WaveFileWriter(new IgnoreDisposeStream(_ms), fmt);
@@ -617,7 +876,7 @@ sealed class AudioRecorder : IDisposable
         double chunkSec = (double)e.BytesRecorded / _capture.WaveFormat.AverageBytesPerSecond;
 
         if (rms > SILENCE_THRESHOLD) { _speechStarted = true; _silenceAccum = 0; }
-        else if (_speechStarted && elapsed > 2.0)
+        else if (_autoStopOnSilence && _speechStarted && elapsed > 2.0)
         {
             _silenceAccum += chunkSec;
             if (_silenceAccum >= SILENCE_DURATION) _capture.StopRecording();
@@ -653,13 +912,22 @@ sealed class TrayApp : ApplicationContext
     private const string WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
     private const string WHISPER_MODEL = "whisper-large-v3-turbo";
     private const string CHAT_URL = "https://api.groq.com/openai/v1/chat/completions";
-    private const string CHAT_MODEL = "llama-3.3-70b-versatile";
+    private const string CHAT_MODEL = "openai/gpt-oss-120b";
 
     // Minimum new audio (bytes) before we fire a live-preview transcription.
     // At 16kHz/16bit/mono: 1 byte = 31.25µs → 32000 bytes ≈ 1 second of audio.
     private const int LIVE_PREVIEW_MIN_NEW_BYTES = 32000; // ~1 second
 
+    // Click-to-start with no speech at all: give up rather than hold the overlay open
+    // until the recorder's 120s hard cap.
+    private const int MANUAL_IDLE_TIMEOUT_SEC = 15;
+
+    private const string TRAY_TEXT_IDLE = "Voice Dictation — click or Win+\\ to dictate";
+    private const string TRAY_TEXT_ACTIVE = "Voice Dictation — recording (click to stop)";
+
     private readonly NotifyIcon _trayIcon;
+    private readonly Icon _iconIdle;
+    private readonly Icon _iconActive;
     private readonly HotkeyWindow _hotkeyWindow;
     private readonly HttpClient _http;
     private readonly OverlayForm _overlay;
@@ -668,6 +936,11 @@ sealed class TrayApp : ApplicationContext
     private volatile bool _isRecording;
     private volatile bool _stopRequested;
     private volatile bool _cancelRequested;
+    // The done sound has two possible trigger points (manual Win+\ stop, and end of
+    // pipeline). Only one of them should ever be heard per dictation cycle.
+    private volatile bool _donePlayed;
+    private DateTime _lastTrayClick = DateTime.MinValue;
+    private volatile bool _manualStopOnly;
     private AudioRecorder? _activeRecorder;
 
     private const int HOTKEY_ID = 1;
@@ -686,15 +959,59 @@ sealed class TrayApp : ApplicationContext
         _overlay = new OverlayForm(_settings);
         _ = _overlay.Handle;
 
+        // Clicking the overlay body means "done speaking": route it through the same
+        // state machine as a second tray click, so Capturing stops and processes and
+        // Processing just reports that it is still working.
+        _overlay.BodyClicked += () =>
+        {
+            if (Phase == DictationPhase.Idle) return;
+            Log.Write("OVERLAY CLICK", "finish requested");
+            ToggleDictation();
+        };
+
+        // The overlay's X abandons the cycle, exactly like Escape.
+        _overlay.CloseClicked += () =>
+        {
+            Log.Write("OVERLAY CLOSE", "cancel requested");
+            _cancelRequested = true;
+            _activeRecorder?.StopNow();
+            _overlay.HideOverlay();
+        };
+
+        // Drawn rather than extracted from shell32 so idle and recording share one shape
+        // and differ only in colour.
+        _iconIdle = DrawMicIcon(Color.FromArgb(56, 132, 255));   // #3884FF
+        _iconActive = DrawMicIcon(Color.FromArgb(235, 56, 56));  // #EB3838
+
         _trayIcon = new NotifyIcon
         {
-            Icon = LoadMicIcon(), Text = "Voice Dictation (Win+\\)",
+            Icon = _iconIdle, Text = TRAY_TEXT_IDLE,
             Visible = true, ContextMenuStrip = BuildMenu()
+        };
+
+        // Assigning ContextMenuStrip only binds the RIGHT button, so left-click is free
+        // to act as a start/stop toggle. This handler runs on the UI thread, which the
+        // Escape-hotkey registration in StartDictation depends on (see HANDOVER.md 9.1).
+        _trayIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            // Click-started dictation is manual-stop: the mic keeps listening until the
+            // next click. Without this the 2s silence auto-stop ends the cycle on its
+            // own, and the "switch it off" click lands in Idle and starts a new one.
+            _manualStopOnly = true;
+            // Tray icons invite double-clicks, and NotifyIcon raises MouseClick for each
+            // one — without this guard a double-click would start and instantly stop a
+            // cycle, yielding a "no speech detected" error.
+            var now = DateTime.UtcNow;
+            if ((now - _lastTrayClick).TotalMilliseconds < 400) return;
+            _lastTrayClick = now;
+            ToggleDictation();
         };
 
         _hotkeyWindow = new HotkeyWindow(OnHotkeyPressed);
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID, MOD_WIN, VK_OEM_5);
 
+        Log.Write("APP LAUNCH", AppVersion.Current);
         PlaySound(_settings.SoundStartPath);
     }
 
@@ -725,36 +1042,65 @@ sealed class TrayApp : ApplicationContext
         }
     }
 
-    private static Icon LoadMicIcon()
+    private static GraphicsPath RoundRect(float x, float y, float w, float h, float r)
     {
-        string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
-        foreach (var (file, idx) in new[] { ("shell32.dll", 243), ("imageres.dll", 108) })
-        {
-            try
-            {
-                var h = ExtractIcon(IntPtr.Zero, Path.Combine(sys, file), idx);
-                if (h != IntPtr.Zero) return Icon.FromHandle(h);
-            }
-            catch { }
-        }
-        return DrawMicIcon();
+        var p = new GraphicsPath();
+        p.AddArc(x, y, r * 2, r * 2, 180, 90);
+        p.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
+        p.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
+        p.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
+        p.CloseFigure();
+        return p;
     }
 
-    [DllImport("shell32.dll")]
-    private static extern IntPtr ExtractIcon(IntPtr hInst, string file, int idx);
-
-    private static Icon DrawMicIcon()
+    // The microphone glyph, authored on a 32-unit grid and scaled into a box of
+    // `box` pixels centred on (cx, cy).
+    private static void DrawMicGlyph(Graphics g, Color c, float cx, float cy, float box, float weight)
     {
-        var b = new Bitmap(32, 32);
+        float u = box / 32f;
+        float X(float v) => cx + (v - 16f) * u;
+        float Y(float v) => cy + (v - 16f) * u;
+
+        using var brush = new SolidBrush(c);
+        using var pen = new Pen(c, weight * u) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+
+        using (var body = RoundRect(X(11), Y(2.5f), 10 * u, 17 * u, 5 * u))
+            g.FillPath(brush, body);
+
+        g.DrawArc(pen, X(6.5f), Y(10f), 19 * u, 15 * u, 0, 180);
+        g.DrawLine(pen, X(16), Y(25.5f), X(16), Y(28.5f));
+        g.DrawLine(pen, X(10.5f), Y(28.5f), X(21.5f), Y(28.5f));
+    }
+
+    // Solid rounded-square badge with the mic knocked out in white. A filled shape
+    // survives the drop to 16px far better than an outlined one: antialiasing turns a
+    // 1px stroke into two half-lit pixels, so thin detail goes grey rather than small.
+    private static Icon DrawMicIcon(Color color)
+    {
+        const float SIZE = 32f;
+        var b = new Bitmap((int)SIZE, (int)SIZE); // defaults to 32bpp ARGB
         using var g = Graphics.FromImage(b);
-        g.SmoothingMode = SmoothingMode.AntiAlias; g.Clear(Color.Transparent);
-        using var pen = new Pen(Color.White, 2f);
-        using var brush = new SolidBrush(Color.White);
-        g.FillEllipse(brush, 11, 3, 10, 10); g.FillRectangle(brush, 11, 8, 10, 8);
-        g.FillEllipse(brush, 11, 12, 10, 6); g.DrawArc(pen, 7, 10, 18, 14, 0, 180);
-        g.DrawLine(pen, 16, 24, 16, 28); g.DrawLine(pen, 10, 28, 22, 28);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Color.Transparent);
+
+        using (var brush = new SolidBrush(color))
+        using (var badge = RoundRect(0.5f, 0.5f, SIZE - 1f, SIZE - 1f, 8f))
+            g.FillPath(brush, badge);
+
+        DrawMicGlyph(g, Color.White, SIZE / 2f, SIZE / 2f, SIZE * 0.62f, 2.8f);
+
         return Icon.FromHandle(b.GetHicon());
     }
+
+    // A dictation cycle has three distinct phases. _isRecording spans the whole cycle,
+    // while _activeRecorder is non-null only while the mic is actually capturing — so
+    // the two together distinguish "still talking" from "waiting on Groq".
+    private enum DictationPhase { Idle, Capturing, Processing }
+
+    private DictationPhase Phase =>
+        !_isRecording ? DictationPhase.Idle
+        : _activeRecorder != null ? DictationPhase.Capturing
+        : DictationPhase.Processing;
 
     private void OnHotkeyPressed(int id)
     {
@@ -768,18 +1114,47 @@ sealed class TrayApp : ApplicationContext
             return;
         }
 
-        if (_isRecording)
-        {
-            _stopRequested = true;
-            _activeRecorder?.StopNow();
-            PlaySound(_settings.SoundDonePath);
-            return;
-        }
+        // Win+\ keeps the original silence auto-stop behaviour.
+        _manualStopOnly = false;
+        ToggleDictation();
+    }
 
+    // Single entry point for both Win+\ and a left-click on the tray icon. Must be
+    // called on the UI thread — StartDictation registers a global hotkey, which is
+    // thread-affine to the hotkey window's message queue (see HANDOVER.md 9.1).
+    private void ToggleDictation()
+    {
+        switch (Phase)
+        {
+            case DictationPhase.Idle:
+                StartDictation();
+                break;
+
+            case DictationPhase.Capturing:
+                Log.Write("TOGGLE", "stop requested while capturing");
+                _stopRequested = true;
+                _activeRecorder?.StopNow();
+                PlayDoneOnce();
+                break;
+
+            case DictationPhase.Processing:
+                // Mic already stopped, audio in flight to Groq, nothing pasted yet.
+                // Acknowledge the click rather than silently swallowing it, but never
+                // throw away speech the user has already waited on.
+                Log.Write("TOGGLE", "ignored - already processing");
+                _overlay.SetStatus("⏳ Still working... (Esc to cancel)");
+                break;
+        }
+    }
+
+    private void StartDictation()
+    {
         _isRecording = true;
         _stopRequested = false;
         _cancelRequested = false;
+        _donePlayed = false;
         HotkeyWindow.RegisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE, MOD_NOREPEAT, VK_ESCAPE);
+        SetTrayRecording(true);
 
         Task.Run(async () =>
         {
@@ -788,6 +1163,7 @@ sealed class TrayApp : ApplicationContext
             finally
             {
                 _isRecording = false;
+                SetTrayRecording(false);
                 // RegisterHotKey/UnregisterHotKey are thread-affine to the window's message
                 // queue — must run on the UI thread, not this background Task.Run thread,
                 // or the OS-level registration silently never releases.
@@ -797,12 +1173,38 @@ sealed class TrayApp : ApplicationContext
         });
     }
 
+    // Mirrors the cycle state onto the tray icon so a click-driven toggle is visible
+    // without the overlay. NotifyIcon is not a Control, so marshal via the overlay's
+    // handle when called from the pipeline's background thread.
+    private void SetTrayRecording(bool active)
+    {
+        void Apply()
+        {
+            try
+            {
+                _trayIcon.Icon = active ? _iconActive : _iconIdle;
+                _trayIcon.Text = active ? TRAY_TEXT_ACTIVE : TRAY_TEXT_IDLE;
+            }
+            catch { }
+        }
+
+        if (_overlay.InvokeRequired)
+        {
+            try { _overlay.BeginInvoke(new Action(Apply)); } catch { }
+        }
+        else Apply();
+    }
+
     private async Task RunPipeline()
     {
+        Log.Write("=== CYCLE START ===");
         PlaySound(_settings.SoundStartPath);
         _overlay.ShowOverlay("\U0001F3A4 Listening...");
 
-        using var rec = new AudioRecorder(_settings.InputDeviceIndex);
+        bool manualStop = _manualStopOnly;
+        Log.Write("MODE", manualStop ? "manual stop (click to end)" : "auto-stop on silence");
+
+        using var rec = new AudioRecorder(_settings.InputDeviceIndex, autoStopOnSilence: !manualStop);
         _activeRecorder = rec;
         rec.Start();
 
@@ -815,9 +1217,22 @@ sealed class TrayApp : ApplicationContext
         // Whether a live-preview transcription is currently in flight
         bool previewInFlight = false;
 
+        var started = DateTime.UtcNow;
+
         while (!rec.IsFinished)
         {
             await Task.Delay(150);
+
+            // Manual-stop mode waits for a second click, so a stray click would otherwise
+            // hold the overlay open for the full 120s cap. If nothing was ever said,
+            // give up rather than sit there listening to an empty room.
+            if (manualStop && !rec.SpeechDetected
+                && (DateTime.UtcNow - started).TotalSeconds > MANUAL_IDLE_TIMEOUT_SEC)
+            {
+                Log.Write("IDLE TIMEOUT", $"no speech within {MANUAL_IDLE_TIMEOUT_SEC}s");
+                _cancelRequested = true;
+                rec.StopNow();
+            }
 
             if (_cancelRequested)
             {
@@ -851,7 +1266,7 @@ sealed class TrayApp : ApplicationContext
                             hasLivePreview = true;
                             // Show the live text and update status to make it clear it's a preview
                             _overlay.SetText(liveText);
-                            _overlay.SetStatus("\U0001F3A4 Listening... (live preview)");
+                            _overlay.SetStatus("\U0001F3A4 Listening...");
                         }
                     }
                     catch { /* silent — final transcription will cover it */ }
@@ -871,6 +1286,17 @@ sealed class TrayApp : ApplicationContext
         rec.WaitUntilDone();
 
         var finalWav = rec.GetFinalWav();
+
+        // Length alone is not enough: a long recording of pure silence still passes it,
+        // and Whisper answers near-silence with confident hallucinated filler.
+        if (!rec.SpeechDetected)
+        {
+            Log.Write("NO SPEECH", $"{finalWav.Length} bytes captured, never exceeded threshold");
+            PlaySound(_settings.SoundErrorPath);
+            _overlay.SetStatus("❌ No speech detected");
+            await Task.Delay(1500); _overlay.HideOverlay(); return;
+        }
+
         if (finalWav.Length < 10000)
         {
             PlaySound(_settings.SoundErrorPath);
@@ -900,11 +1326,30 @@ sealed class TrayApp : ApplicationContext
         _overlay.SetText(raw);
         _overlay.SetStatus("\u2728 Cleaning up before pasting...");
 
+        Log.Write("RAW", JsonSerializer.Serialize(raw));
+
         string polished = "";
-        try { polished = await Polish(raw); } catch { PlaySound(_settings.SoundErrorPath); }
+        try
+        {
+            polished = await Polish(raw);
+            Log.Write("POLISHED", JsonSerializer.Serialize(polished));
+        }
+        catch (Exception ex)
+        {
+            Log.Write("POLISH-FAILED", ex.GetType().Name + ": " + ex.Message);
+            PlaySound(_settings.SoundErrorPath);
+        }
 
         string output = !string.IsNullOrWhiteSpace(polished) ? polished : raw;
-        try { output = EnforceMessageStructure(output); } catch { /* keep unformatted output on failure */ }
+        try
+        {
+            output = EnforceMessageStructure(output);
+            Log.Write("FORMATTED", JsonSerializer.Serialize(output));
+        }
+        catch (Exception ex)
+        {
+            Log.Write("FORMAT-FAILED", ex.GetType().Name + ": " + ex.Message);
+        }
         _overlay.SetText(output);
         _overlay.SetStatus("\u2705 Done!");
 
@@ -914,10 +1359,12 @@ sealed class TrayApp : ApplicationContext
         await tcs.Task;
 
         await Task.Delay(150);
+        Log.Write("PASTE (Ctrl+V)");
         SendCtrlV();
-        PlaySound(_settings.SoundDonePath);
+        PlayDoneOnce();
         await Task.Delay(2000);
         _overlay.HideOverlay();
+        Log.Write("=== CYCLE END ===");
     }
 
     private async Task<string> Transcribe(byte[] wav)
@@ -984,57 +1431,87 @@ sealed class TrayApp : ApplicationContext
         "but", "so", "however", "then", "also", "thereafter", "additionally", "meanwhile"
     };
 
+    // Deterministic typography cleanup. The AI pass is inconsistent about spacing and
+    // capitalization no matter how the prompt is worded (see HANDOVER.md s8), so these
+    // fixes are applied in code rather than asked for.
+    private static string NormalizeTypography(string text)
+    {
+        text = text.Replace("\r\n", "\n").Replace('\r', '\n');
+
+        // Collapse runs of spaces/tabs, and strip trailing space on each line.
+        text = Regex.Replace(text, @"[ \t]+", " ");
+        text = Regex.Replace(text, @" +$", "", RegexOptions.Multiline);
+
+        // No space BEFORE punctuation; exactly one space AFTER it.
+        text = Regex.Replace(text, @"\s+([,.!?;:])", "$1");
+        text = Regex.Replace(text, @"([,;:])(?=[A-Za-z0-9])", "$1 ");
+        // Sentence punctuation. The lookbehind skips initialisms - a period whose letter
+        // is itself preceded by a word boundary ("u.s.a.", "a.m.") is not a sentence end.
+        text = Regex.Replace(text, @"(?<!\b[A-Za-z])([.!?])(?=[A-Za-z])", "$1 ");
+
+        // Dictation routinely yields a bare lowercase "i".
+        text = Regex.Replace(text, @"(?<![A-Za-z'])i(?![A-Za-z'])", "I");
+
+        // Capitalize the first letter of the text, of every line, and of every sentence.
+        text = Regex.Replace(text, @"^[a-z]", m => m.Value.ToUpperInvariant());
+        text = Regex.Replace(text, @"(?<=\n)([ \t]*)([a-z])",
+            m => m.Groups[1].Value + char.ToUpper(m.Groups[2].Value[0]));
+        text = Regex.Replace(text, @"(?<!\b[A-Za-z])([.!?]\s+)([a-z])",
+            m => m.Groups[1].Value + char.ToUpper(m.Groups[2].Value[0]));
+
+        // Never more than one blank line between paragraphs.
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
+
+        return text.Trim();
+    }
+
     // Deterministic fallback formatting so greeting/body/sign-off structure and paragraph
     // breaks always land, regardless of whether the AI cleanup pass applied them.
     private static string EnforceMessageStructure(string text)
     {
-        text = text.Trim();
+        text = NormalizeTypography(text);
         if (text.Length == 0) return text;
 
         string greetingLine = null;
-        var greetingMatch = Regex.Match(text, @"^(Hi|Hey|Hello|Dear|Greetings)\s+([A-Za-z][A-Za-z'-]{0,30})\s*,?\s*", RegexOptions.IgnoreCase);
+        var greetingMatch = Regex.Match(text, @"^(Hi|Hey|Hello|Dear|Greetings)\s+([A-Za-z][A-Za-z'-]{0,30})\s*[,.!]?\s*", RegexOptions.IgnoreCase);
         if (greetingMatch.Success)
         {
             var salutation = greetingMatch.Groups[1].Value;
             var name = greetingMatch.Groups[2].Value;
-            greetingLine = $"{char.ToUpper(salutation[0])}{salutation.Substring(1).ToLower()} {name},";
+            greetingLine = $"{char.ToUpper(salutation[0])}{salutation.Substring(1).ToLower()} {char.ToUpper(name[0])}{name.Substring(1)},";
             text = text.Substring(greetingMatch.Length).TrimStart();
             if (text.Length > 0 && char.IsLower(text[0]))
                 text = char.ToUpper(text[0]) + text.Substring(1);
         }
 
-        var sentences = Regex.Split(text, @"(?<=[.!?])\s+").Where(s => s.Trim().Length > 0).ToList();
-
+        // Peel the sign-off off the tail BEFORE paragraphing, so it never gets glued
+        // onto the last body paragraph.
         string signOffLine = null;
-        if (sentences.Count > 0)
+        var tailMatch = Regex.Match(text, @"(?:^|(?<=[.!?])\s+|\n)\s*([A-Za-z][A-Za-z ]*?)\s*[,.!]?\s*(?:\n+\s*([A-Z][A-Za-z'-]{1,20}(?: [A-Z][A-Za-z'-]{1,20})?)\s*[.!]?)?\s*$");
+        if (tailMatch.Success)
         {
-            var last = sentences[^1].Trim().TrimEnd('.', '!', '?', ' ');
+            var candidate = tailMatch.Groups[1].Value.Trim();
             foreach (var phrase in SignOffPhrases)
             {
-                if (last.Equals(phrase, StringComparison.OrdinalIgnoreCase))
-                {
-                    signOffLine = $"{char.ToUpper(last[0])}{last.Substring(1)}.";
-                    sentences.RemoveAt(sentences.Count - 1);
-                    break;
-                }
+                if (!candidate.Equals(phrase, StringComparison.OrdinalIgnoreCase)) continue;
+                var head = $"{char.ToUpper(candidate[0])}{candidate.Substring(1).ToLower()}";
+                var name = tailMatch.Groups[2].Success ? tailMatch.Groups[2].Value.Trim() : "";
+                signOffLine = name.Length > 0 ? $"{head},\n{name}" : $"{head}.";
+                text = text.Substring(0, tailMatch.Index).TrimEnd();
+                break;
             }
         }
 
+        // Respect the paragraph breaks the AI pass already produced — the previous
+        // version flattened them with string.Join(" ", ...) and re-split from scratch,
+        // which is why well-structured output kept coming back as one block.
         var paragraphs = new System.Collections.Generic.List<string>();
-        var current = new System.Collections.Generic.List<string>();
-        foreach (var raw in sentences)
+        foreach (var block in Regex.Split(text, @"\n\s*\n"))
         {
-            var s = raw.Trim();
-            var firstWord = Regex.Match(s, @"^[A-Za-z]+").Value;
-            bool startsTransition = TransitionWords.Contains(firstWord, StringComparer.OrdinalIgnoreCase);
-            if (current.Count > 0 && (startsTransition || current.Count >= 3))
-            {
-                paragraphs.Add(string.Join(" ", current));
-                current.Clear();
-            }
-            current.Add(s);
+            var flat = Regex.Replace(block.Replace('\n', ' '), @"\s+", " ").Trim();
+            if (flat.Length == 0) continue;
+            paragraphs.AddRange(SplitIntoParagraphs(flat));
         }
-        if (current.Count > 0) paragraphs.Add(string.Join(" ", current));
 
         var result = new System.Collections.Generic.List<string>();
         if (greetingLine != null) result.Add(greetingLine);
@@ -1042,6 +1519,33 @@ sealed class TrayApp : ApplicationContext
         if (signOffLine != null) result.Add(signOffLine);
 
         return result.Count > 0 ? string.Join("\n\n", result) : text;
+    }
+
+    // Breaks one dense block into paragraphs of at most 3 sentences, starting a new
+    // one at any transition word.
+    private static System.Collections.Generic.List<string> SplitIntoParagraphs(string block)
+    {
+        // Same initialism guard as NormalizeTypography, shifted one char: do not treat
+        // the trailing period of "u.s.a." as a sentence boundary.
+        var sentences = Regex.Split(block, @"(?<!\b[A-Za-z]\.)(?<=[.!?])\s+")
+            .Where(x => x.Trim().Length > 0).ToList();
+        var paragraphs = new System.Collections.Generic.List<string>();
+        var current = new System.Collections.Generic.List<string>();
+
+        foreach (var raw in sentences)
+        {
+            var sentence = raw.Trim();
+            var firstWord = Regex.Match(sentence, @"^[A-Za-z]+").Value;
+            bool startsTransition = TransitionWords.Contains(firstWord, StringComparer.OrdinalIgnoreCase);
+            if (current.Count > 0 && (startsTransition || current.Count >= 3))
+            {
+                paragraphs.Add(string.Join(" ", current));
+                current.Clear();
+            }
+            current.Add(sentence);
+        }
+        if (current.Count > 0) paragraphs.Add(string.Join(" ", current));
+        return paragraphs;
     }
 
     private static string LoadApiKey()
@@ -1072,10 +1576,21 @@ sealed class TrayApp : ApplicationContext
         Environment.Exit(1); return "";
     }
 
-    private void PlaySound(string path)
+    private void PlaySound(string path, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
     {
-        if (!_settings.SoundsEnabled) return;
+        if (!_settings.SoundsEnabled) { Log.Write("SOUND-SKIP (disabled)", $"line {line}"); return; }
+        Log.Write("SOUND", $"{System.IO.Path.GetFileName(path)}  (line {line})");
         SoundPlayback.Play(path, _settings.SoundVolume);
+    }
+
+    // Plays the done sound at most once per dictation cycle, whichever trigger fires
+    // first — stopping manually with Win+\ used to chime, then chime again on paste.
+    private void PlayDoneOnce([System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+    {
+        if (_donePlayed) { Log.Write("DONE-SUPPRESSED", $"already played (line {line})"); return; }
+        _donePlayed = true;
+        Log.Write("DONE-SOUND", $"line {line}");
+        PlaySound(_settings.SoundDonePath);
     }
 
     [DllImport("user32.dll")]
