@@ -628,6 +628,21 @@ sealed class OverlayForm : Form
     private readonly Panel _panel;
     private readonly Button _btnClose;
 
+    // --- dynamic height -----------------------------------------------------
+    // The window grows UPWARDS as the transcript gets longer: the bottom edge is
+    // pinned and the top edge rises, so it never creeps over the taskbar or shifts
+    // sideways. Growth is eased rather than stepped so it reads as a slide, not a jerk.
+    private const int MIN_HEIGHT = 124;
+    private const int PAD_H = 16;   // _panel left/right padding
+    private const int PAD_V = 12;   // _panel top/bottom padding
+    private const int STATUS_H = 24;
+
+    private readonly System.Windows.Forms.Timer _growTimer;
+    private int _bottomAnchor;      // screen Y of the fixed bottom edge
+    private int _targetHeight = MIN_HEIGHT;
+    private double _animHeight = MIN_HEIGHT;
+    private string _fullText = "";
+
     // X clicked: abandon the cycle and paste nothing, exactly like Escape.
     public event Action CloseClicked;
 
@@ -641,7 +656,8 @@ sealed class OverlayForm : Form
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(380, 124);
+        Size = new Size(380, MIN_HEIGHT);
+        DoubleBuffered = true;
         try { int pref = 2; DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int)); } catch { }
 
         _panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 12, 16, 12) };
@@ -696,6 +712,93 @@ sealed class OverlayForm : Form
         // out of the topmost band. Re-assert the z-order on a timer while visible.
         _topmostTimer = new System.Windows.Forms.Timer { Interval = 400 };
         _topmostTimer.Tick += (_, _) => AssertTopmost();
+
+        _growTimer = new System.Windows.Forms.Timer { Interval = 15 };  // ~60fps
+        _growTimer.Tick += (_, _) => StepGrow();
+    }
+
+    // Exponential ease toward the target height. Each tick closes a fixed fraction of
+    // the remaining distance, so it starts quickly and settles gently, and a target
+    // that changes mid-flight is absorbed without restarting the animation.
+    private void StepGrow()
+    {
+        var diff = _targetHeight - _animHeight;
+        if (Math.Abs(diff) < 0.75)
+        {
+            _animHeight = _targetHeight;
+            ApplyHeight((int)Math.Round(_animHeight));
+            _growTimer.Stop();
+            return;
+        }
+
+        _animHeight += diff * 0.22;
+        ApplyHeight((int)Math.Round(_animHeight));
+    }
+
+    private void ApplyHeight(int h)
+    {
+        // Bottom edge pinned: the top edge is what moves.
+        SetBounds(Left, _bottomAnchor - h, Width, h);
+        AssertTopmost();
+    }
+
+    // Height the window needs for the current text, clamped so it can never run off
+    // the top of the screen.
+    private int MeasureRequiredHeight(string text, out int maxTextHeight)
+    {
+        var screen = Screen.FromPoint(new Point(Left + Width / 2, _bottomAnchor - 10))
+                     ?? Screen.PrimaryScreen;
+        var wa = screen!.WorkingArea;
+
+        int chromeH = PAD_V * 2 + STATUS_H;
+        int maxWindow = Math.Max(MIN_HEIGHT, (int)(wa.Height * 0.6));
+        maxTextHeight = maxWindow - chromeH;
+
+        if (string.IsNullOrEmpty(text)) return MIN_HEIGHT;
+
+        int wrapWidth = Math.Max(50, Width - PAD_H * 2);
+        var measured = TextRenderer.MeasureText(
+            text, _textLabel.Font,
+            new Size(wrapWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+
+        return Math.Clamp(measured.Height + chromeH + 6, MIN_HEIGHT, maxWindow);
+    }
+
+    // Keep the most recent words when the text outgrows the maximum window height:
+    // during dictation the tail is what the user just said.
+    private string FitToHeight(string text, int maxTextHeight)
+    {
+        int wrapWidth = Math.Max(50, Width - PAD_H * 2);
+
+        Size Measure(string s) => TextRenderer.MeasureText(
+            s, _textLabel.Font, new Size(wrapWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+
+        if (Measure(text).Height <= maxTextHeight) return text;
+
+        // Drop whole words from the front until it fits.
+        var words = text.Split(' ');
+        int lo = 0, hi = words.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) / 2;
+            var candidate = "… " + string.Join(" ", words.Skip(mid));
+            if (Measure(candidate).Height <= maxTextHeight) hi = mid; else lo = mid + 1;
+        }
+        return "… " + string.Join(" ", words.Skip(lo));
+    }
+
+    private void RelayoutForText()
+    {
+        int required = MeasureRequiredHeight(_fullText, out int maxTextHeight);
+        _textLabel.Text = FitToHeight(_fullText, maxTextHeight);
+
+        if (required != _targetHeight)
+        {
+            _targetHeight = required;
+            if (Visible && !_growTimer.Enabled) _growTimer.Start();
+        }
     }
 
     [DllImport("dwmapi.dll")]
@@ -746,13 +849,23 @@ sealed class OverlayForm : Form
         if (InvokeRequired) { Invoke(() => ShowOverlay(status)); return; }
         _statusLabel.Text = status;
         _textLabel.Text = "";
+        _fullText = "";
+
+        // Start collapsed again; each cycle grows from the minimum.
+        _growTimer.Stop();
+        _targetHeight = MIN_HEIGHT;
+        _animHeight = MIN_HEIGHT;
 
         // Show on the monitor the user is actually working on, not always the primary
         // one — otherwise the overlay renders off on another display and looks absent.
         var screen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen!;
         var wa = screen.WorkingArea;
         Left = wa.Right - Width - 12;
-        Top = wa.Bottom - Height - 12;
+
+        // Pin the bottom edge: all later growth moves the TOP edge upwards.
+        _bottomAnchor = wa.Bottom - 12;
+        Top = _bottomAnchor - MIN_HEIGHT;
+        Height = MIN_HEIGHT;
 
         TopMost = true;
         Show();
@@ -760,24 +873,13 @@ sealed class OverlayForm : Form
         _topmostTimer.Start();
     }
 
-    // Roughly what fits in the smaller overlay at the default font.
-    private const int MAX_PREVIEW_CHARS = 260;
-
-    // A top-aligned Label clips the END of long text, which in a live preview hides the
-    // words just spoken. Show the tail instead; the clipboard still gets the full text.
-    private static string TailFit(string text)
-    {
-        if (string.IsNullOrEmpty(text) || text.Length <= MAX_PREVIEW_CHARS) return text;
-        var tail = text.Substring(text.Length - MAX_PREVIEW_CHARS);
-        var space = tail.IndexOf(' ');
-        if (space > 0 && space < 40) tail = tail.Substring(space + 1);
-        return "… " + tail;
-    }
-
     public void SetText(string text)
     {
         if (InvokeRequired) { Invoke(() => SetText(text)); return; }
-        _textLabel.Text = TailFit(text);
+        _fullText = text ?? "";
+        // Grow to fit rather than truncating at a fixed character count; only text
+        // beyond the maximum window height is trimmed, and then from the front.
+        RelayoutForText();
         AssertTopmost();
     }
 
@@ -792,6 +894,7 @@ sealed class OverlayForm : Form
     {
         if (InvokeRequired) { Invoke(() => HideOverlay()); return; }
         _topmostTimer.Stop();
+        _growTimer.Stop();
         Hide();
     }
 
@@ -817,7 +920,7 @@ sealed class AudioRecorder : IDisposable
     public const int SAMPLE_RATE = 16000;
     private const double SILENCE_THRESHOLD = 0.005;
     private const double SILENCE_DURATION = 2.0;
-    private const int MAX_RECORD_SEC = 120;
+    private const int MAX_RECORD_SEC = 300;
 
     private readonly WaveInEvent _capture;
     private readonly MemoryStream _ms;
@@ -825,6 +928,7 @@ sealed class AudioRecorder : IDisposable
     private readonly ManualResetEventSlim _done = new(false);
     private readonly bool _autoStopOnSilence;
     private volatile bool _speechStarted;
+    private bool _capHit;
     private double _silenceAccum;
     private DateTime _startTime;
     private int _totalBytesWritten;
@@ -882,7 +986,14 @@ sealed class AudioRecorder : IDisposable
             if (_silenceAccum >= SILENCE_DURATION) _capture.StopRecording();
         }
 
-        if (elapsed > MAX_RECORD_SEC) _capture.StopRecording();
+        if (elapsed > MAX_RECORD_SEC && !_capHit)
+        {
+            // Hitting the cap truncates mid-sentence, so make it visible in the log
+            // rather than leaving it to look like a transcription bug.
+            _capHit = true;
+            Log.Write("MAX-RECORD-CAP", $"stopped at {MAX_RECORD_SEC}s - audio truncated");
+            _capture.StopRecording();
+        }
     }
 
     private static double ComputeRms(byte[] buf, int len)
@@ -952,7 +1063,9 @@ sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _settings = AppSettings.Load();
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        // 30s was too short once recordings could run long: a big WAV upload plus Whisper
+        // could exceed it, and the catch fell back to a partial live preview.
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(180) };
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GROQ_API_KEY);
 
         _overlay = new OverlayForm(_settings);
@@ -1300,7 +1413,15 @@ sealed class TrayApp : ApplicationContext
 
         string raw;
         try { raw = await Transcribe(finalWav); }
-        catch { raw = liveText; }
+        catch (Exception ex)
+        {
+            // The live preview is a snapshot taken mid-recording, so it is missing
+            // everything said after it. Falling back to it silently looks exactly like
+            // "it cut off the end" — which is why this is logged loudly.
+            Log.Write("TRANSCRIBE-FAILED", $"{ex.GetType().Name}: {ex.Message}");
+            Log.Write("FALLBACK", $"using live preview, {liveText.Length} chars - TAIL WILL BE MISSING");
+            raw = liveText;
+        }
 
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -1385,7 +1506,7 @@ sealed class TrayApp : ApplicationContext
                 new { role = "system", content = systemPrompt },
                 new { role = "user", content = text }
             },
-            temperature = 0.15, max_tokens = 2048
+            temperature = 0.15, max_tokens = 8192
         };
 
         var r = await _http.PostAsync(CHAT_URL,
@@ -1394,21 +1515,8 @@ sealed class TrayApp : ApplicationContext
         using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
         var result = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
 
-        var lines = result.Split('\n');
-        var trimmed = new System.Collections.Generic.List<string>();
-        foreach (var line in lines)
-        {
-            var lower = line.TrimStart().ToLowerInvariant();
-            if (lower.StartsWith("note:") || lower.StartsWith("(note") ||
-                lower.StartsWith("please note") || lower.StartsWith("i have") ||
-                lower.StartsWith("i've ") || lower.StartsWith("the above") ||
-                lower.StartsWith("this is") || lower.StartsWith("i cleaned") ||
-                lower.StartsWith("i fixed") || lower.StartsWith("changes made") ||
-                lower.StartsWith("i made") || lower.StartsWith("let me know"))
-                break;
-            trimmed.Add(line);
-        }
-        return string.Join('\n', trimmed).TrimEnd();
+        return MessageFormatter.StripTrailingCommentary(
+            result, stripped => Log.Write("STRIPPED-COMMENTARY", stripped));
     }
 
     private static string LoadApiKey()

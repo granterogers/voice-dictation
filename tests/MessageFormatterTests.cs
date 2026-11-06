@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Xunit;
 
 namespace VoiceDictation.Tests;
@@ -110,6 +111,70 @@ public class MessageFormatterTests
     public void Regression_decimals_and_abbreviations_survive(string input, string expected)
     {
         Assert.Contains(expected, Format(input));
+    }
+
+    // ------------------------------------------------- trailing commentary stripping
+
+    private static string Strip(string input) =>
+        MessageFormatter.StripTrailingCommentary(input);
+
+    [Theory]
+    // All of these are ordinary dictated sentences that the old top-down scanner
+    // treated as model commentary, discarding them AND everything after them.
+    [InlineData("Let me know if you need anything.")]
+    [InlineData("I have attached the drawings.")]
+    [InlineData("I've sent the quote over.")]
+    [InlineData("This is the revised scope.")]
+    [InlineData("I made a start on the millwork.")]
+    public void Regression_ordinary_sentences_are_never_mistaken_for_commentary(string sentence)
+    {
+        var input = "Hi Mark,\n\nHere is the update.\n\n" + sentence;
+        Assert.Equal(input, Strip(input));
+    }
+
+    [Fact]
+    public void Regression_content_after_an_innocent_phrase_is_not_discarded()
+    {
+        // The exact shape of the bug: a middle paragraph beginning "I have ..." used to
+        // delete everything from there to the end.
+        var input =
+            "Hi Mark,\n\n" +
+            "Thanks for the call earlier.\n\n" +
+            "I have attached the drawings.\n\n" +
+            "The panel yield is still low, so we should revisit the optimiser.\n\n" +
+            "Thanks,\nGrant";
+
+        var actual = Strip(input);
+
+        Assert.Equal(input, actual);
+        Assert.Contains("revisit the optimiser", actual);
+        Assert.EndsWith("Grant", actual);
+    }
+
+    [Fact]
+    public void Genuine_trailing_commentary_is_removed()
+    {
+        var actual = Strip("Here is the update.\n\nNote: I fixed the punctuation.");
+        Assert.Equal("Here is the update.", actual);
+    }
+
+    [Fact]
+    public void Commentary_is_only_stripped_from_the_end()
+    {
+        // A line that looks like commentary but has real content after it must survive,
+        // because removing it would take the real content with it.
+        var input = "Note: this is part of what I dictated.\n\nAnd here is the rest.";
+        Assert.Equal(input, Strip(input));
+    }
+
+    [Fact]
+    public void Stripping_reports_what_it_removed()
+    {
+        var removed = new List<string>();
+        MessageFormatter.StripTrailingCommentary(
+            "Body.\n\nNote: I fixed the spacing.", removed.Add);
+
+        Assert.Equal(new[] { "Note: I fixed the spacing." }, removed);
     }
 
     // ---------------------------------------------------------------- typography

@@ -23,6 +23,50 @@ internal static class MessageFormatter
         "sincerely", "cheers", "talk soon", "take care", "regards"
     };
 
+    // Phrases that only ever appear as the model talking ABOUT its edit. Deliberately
+    // conservative: a stray "Note:" surviving is cosmetic, whereas deleting a sentence
+    // the user actually dictated is data loss.
+    internal static readonly string[] CommentaryPrefixes =
+    {
+        "note:", "(note", "note that i", "the above text", "the text above",
+        "i cleaned", "i have cleaned", "i fixed", "i have fixed", "i corrected",
+        "i have corrected", "changes made", "here is the cleaned", "here's the cleaned",
+        "cleaned text:", "corrected text:",
+    };
+
+    // Remove meta-commentary from the END only.
+    //
+    // This previously scanned from the TOP and `break`-ed on the first match, discarding
+    // everything after it — and the match list included "i have", "i've", "this is" and
+    // "let me know", all ordinary ways to begin a dictated sentence. Since each paragraph
+    // sits on its own line, a paragraph starting "Let me know if you need anything"
+    // silently deleted the remainder of the message, and the longer the dictation the
+    // more paragraphs there were to trip it.
+    //
+    // onStripped (optional) reports each removed line, so the app can log it without
+    // this file taking a dependency on the logger.
+    internal static string StripTrailingCommentary(string result, Action<string> onStripped = null)
+    {
+        if (string.IsNullOrEmpty(result)) return result ?? "";
+
+        var lines = result.Replace("\r\n", "\n").Split('\n').ToList();
+
+        while (lines.Count > 0)
+        {
+            var last = lines[^1].TrimStart().ToLowerInvariant();
+            if (last.Length == 0) { lines.RemoveAt(lines.Count - 1); continue; }
+            if (CommentaryPrefixes.Any(p => last.StartsWith(p, StringComparison.Ordinal)))
+            {
+                onStripped?.Invoke(lines[^1].Trim());
+                lines.RemoveAt(lines.Count - 1);
+                continue;
+            }
+            break;
+        }
+
+        return string.Join("\n", lines).TrimEnd();
+    }
+
     // Words that can follow a salutation but are not names, so must not be capitalised.
     internal static readonly string[] NonNameGreetingWords = { "there", "again", "all" };
 
