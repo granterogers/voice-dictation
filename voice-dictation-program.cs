@@ -118,11 +118,12 @@ class AppSettings
         ("Window",    "Windows Restore.wav",          "Windows Minimize.wav",     "Windows Recycle.wav"),
         ("Classic",   "Speech On.wav",                "Speech Off.wav",           "Windows Foreground.wav"),
     };
-    public float OverlayFontSize { get; set; } = 10.5f;
+    public float OverlayFontSize { get; set; } = 10.5f;        // dictated text
+    public float OverlayTitleFontSize { get; set; } = 10f;     // the status line
     public int OverlayBgR { get; set; } = 24;
     public int OverlayBgG { get; set; } = 24;
     public int OverlayBgB { get; set; } = 28;
-    public int OverlayOpacity { get; set; } = 75;
+    public int OverlayOpacity { get; set; } = 90;
     public int TextColorR { get; set; } = 230;
     public int TextColorG { get; set; } = 230;
     public int TextColorB { get; set; } = 230;
@@ -209,429 +210,6 @@ class AppSettings
             catch { File.WriteAllText(SettingsPathAlt, json); }
         }
         catch { }
-    }
-}
-
-// ============================================================================
-// Settings form
-// ============================================================================
-
-sealed class SettingsForm : Form
-{
-    private readonly AppSettings _s;
-    private const string CUSTOM_SCHEME = "Custom";
-    private readonly ComboBox _cmbStart, _cmbDone, _cmbError, _cmbDevice, _cmbScheme;
-    // Set while ApplyScheme() drives the three sound combos, so their change handlers
-    // don't immediately flip the scheme back to "Custom".
-    private bool _applyingScheme;
-    private readonly CheckBox _chkSounds;
-    private readonly TrackBar _trkVolume;
-    private readonly Label _lblVolume;
-    private NAudio.Wave.WaveOutEvent _volumePreviewOutput;
-    private NAudio.Wave.AudioFileReader _volumePreviewReader;
-    private readonly NumericUpDown _numFont;
-    private readonly NumericUpDown _numSilence;
-    private readonly TextBox _txtPrompt;
-    private readonly TrackBar _trkOpacity;
-    private readonly Label _lblOpacity;
-    private readonly Panel _pnlBg, _pnlText, _pnlStatus, _prevPanel;
-    private readonly Label _prevStatus, _prevText;
-    private Color _bgColor, _textColor, _statusColor;
-
-    // WAV file names (just the filename, e.g. "Windows Notify.wav")
-    private readonly string[] _wavNames;
-
-    public SettingsForm(AppSettings settings)
-    {
-        _s = settings;
-        _bgColor = _s.OverlayBgColor;
-        _textColor = _s.TextColor;
-        _statusColor = _s.StatusColor;
-
-        // Gather WAV filenames
-        if (Directory.Exists(AppSettings.MediaDir))
-        {
-            var paths = Directory.GetFiles(AppSettings.MediaDir, "*.wav");
-            _wavNames = new string[paths.Length];
-            for (int i = 0; i < paths.Length; i++)
-                _wavNames[i] = Path.GetFileName(paths[i]);
-            Array.Sort(_wavNames, StringComparer.OrdinalIgnoreCase);
-        }
-        else
-        {
-            _wavNames = Array.Empty<string>();
-        }
-
-        // Sounds shipped beside the exe (sounds\) are offered alongside the Windows ones.
-        // Listed first so they are easy to find; AppSettings resolves a bare filename
-        // against this folder before falling back to C:\Windows\Media.
-        if (Directory.Exists(AppSettings.LocalSoundsDir))
-        {
-            var local = Directory.GetFiles(AppSettings.LocalSoundsDir)
-                .Where(f => f.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)
-                         || f.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
-                .Select(Path.GetFileName)
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            if (local.Length > 0)
-                _wavNames = local.Concat(_wavNames).ToArray();
-        }
-
-        Text = $"Voice Dictation — Settings ({AppVersion.Current})";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false; MinimizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
-        Font = new Font("Segoe UI", 9f);
-        ClientSize = new Size(520, 740);
-
-        var y = 10;
-
-        // === INPUT DEVICE ===
-        Lbl("Input Device", 12, y, true); y += 22;
-        _cmbDevice = new ComboBox
-        {
-            Location = new Point(12, y), Size = new Size(496, 24),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        _cmbDevice.Items.Add("(System default)");
-        for (int i = 0; i < WaveInEvent.DeviceCount; i++)
-            _cmbDevice.Items.Add(WaveInEvent.GetCapabilities(i).ProductName);
-        _cmbDevice.SelectedIndex = Math.Min(_s.InputDeviceIndex + 1, _cmbDevice.Items.Count - 1);
-        if (_cmbDevice.SelectedIndex < 0) _cmbDevice.SelectedIndex = 0;
-        Controls.Add(_cmbDevice);
-        y += 32;
-
-        // === WHEN TO STOP ===
-        Lbl("Finish Dictation", 12, y, true); y += 22;
-        Lbl("Stop after", 12, y + 4);
-        _numSilence = new NumericUpDown
-        {
-            Location = new Point(78, y), Size = new Size(60, 24),
-            Minimum = 0, Maximum = 30, Value = Math.Clamp(_s.SilenceTimeoutSec, 0, 30)
-        };
-        Controls.Add(_numSilence);
-        Lbl("seconds with no words spoken   (0 = only stop when I click or press the hotkey)", 146, y + 4);
-        y += 34;
-
-        // === SOUNDS ===
-        Lbl("Sounds", 12, y, true); y += 22;
-        _chkSounds = new CheckBox
-        {
-            Text = "Enable sounds", Checked = _s.SoundsEnabled,
-            Location = new Point(12, y), AutoSize = true
-        };
-        Controls.Add(_chkSounds);
-
-        Lbl("Volume:", 160, y + 2);
-        _trkVolume = new TrackBar
-        {
-            Location = new Point(220, y - 2), Size = new Size(160, 30),
-            Minimum = 0, Maximum = 100, Value = _s.SoundVolume,
-            TickFrequency = 10, SmallChange = 5
-        };
-        _lblVolume = new Label { Location = new Point(384, y + 2), AutoSize = true, Text = _s.SoundVolume + "%" };
-        _trkVolume.ValueChanged += (_, _) => { _lblVolume.Text = _trkVolume.Value + "%"; PreviewVolume(_trkVolume.Value); };
-        Controls.Add(_trkVolume); Controls.Add(_lblVolume);
-        y += 40;
-
-        Lbl("Scheme:", 12, y + 2);
-        _cmbScheme = new ComboBox
-        {
-            Location = new Point(60, y), Size = new Size(170, 24),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        _cmbScheme.Items.Add(CUSTOM_SCHEME);
-        foreach (var s in AppSettings.SoundSchemes) _cmbScheme.Items.Add(s.Name);
-        _cmbScheme.SelectedItem = _cmbScheme.Items.Contains(_s.SoundScheme) ? _s.SoundScheme : CUSTOM_SCHEME;
-        _cmbScheme.SelectedIndexChanged += (_, _) => ApplyScheme();
-        Controls.Add(_cmbScheme);
-
-        var btnPreviewScheme = new Button { Text = "Preview", Size = new Size(80, 25), Location = new Point(240, y - 1) };
-        btnPreviewScheme.Click += (_, _) => PreviewScheme();
-        Controls.Add(btnPreviewScheme);
-        y += 30;
-
-        Lbl("Start:", 12, y + 2);
-        _cmbStart = SndCombo(_s.SoundStart, 60, y); y += 28;
-        Lbl("Done:", 12, y + 2);
-        _cmbDone = SndCombo(_s.SoundDone, 60, y); y += 28;
-        Lbl("Error:", 12, y + 2);
-        _cmbError = SndCombo(_s.SoundError, 60, y); y += 36;
-
-        // === OVERLAY ===
-        Lbl("Overlay", 12, y, true); y += 26;
-
-        // Row 1: Font size
-        Lbl("Font size:", 12, y + 2);
-        _numFont = new NumericUpDown
-        {
-            Location = new Point(80, y), Size = new Size(60, 24),
-            Minimum = 8, Maximum = 24, DecimalPlaces = 1, Increment = 0.5m,
-            Value = (decimal)_s.OverlayFontSize
-        };
-        _numFont.ValueChanged += (_, _) => RefreshPreview();
-        Controls.Add(_numFont);
-        y += 30;
-
-        // Row 2: Colors
-        Lbl("Background:", 12, y + 2);
-        _pnlBg = ColorSwatch(_bgColor, 100, y + 1, c => { _bgColor = c; RefreshPreview(); });
-        Lbl("Text:", 160, y + 2);
-        _pnlText = ColorSwatch(_textColor, 200, y + 1, c => { _textColor = c; RefreshPreview(); });
-        Lbl("Status:", 260, y + 2);
-        _pnlStatus = ColorSwatch(_statusColor, 315, y + 1, c => { _statusColor = c; RefreshPreview(); });
-        y += 30;
-
-        // Row 3: Opacity
-        Lbl("Bg opacity:", 12, y + 2);
-        _trkOpacity = new TrackBar
-        {
-            Location = new Point(90, y - 2), Size = new Size(180, 30),
-            Minimum = 30, Maximum = 100, Value = _s.OverlayOpacity,
-            TickFrequency = 10, SmallChange = 5
-        };
-        _lblOpacity = new Label { Location = new Point(274, y + 2), AutoSize = true, Text = _s.OverlayOpacity + "%" };
-        _trkOpacity.ValueChanged += (_, _) => { _lblOpacity.Text = _trkOpacity.Value + "%"; RefreshPreview(); };
-        Controls.Add(_trkOpacity); Controls.Add(_lblOpacity);
-        y += 40;
-
-        // Preview
-        _prevPanel = new Panel { Location = new Point(12, y), Size = new Size(496, 60), BorderStyle = BorderStyle.FixedSingle };
-        _prevStatus = new Label { Dock = DockStyle.Top, Height = 20, BackColor = Color.Transparent, Padding = new Padding(6, 3, 0, 0) };
-        _prevText = new Label { Dock = DockStyle.Fill, BackColor = Color.Transparent, Padding = new Padding(6, 1, 6, 0), TextAlign = ContentAlignment.TopLeft };
-        _prevPanel.Controls.Add(_prevText);
-        _prevPanel.Controls.Add(_prevStatus);
-        Controls.Add(_prevPanel);
-        RefreshPreview();
-        y += 68;
-
-        // === AI PROMPT ===
-        Lbl("AI Cleanup Prompt", 12, y, true); y += 20;
-        var desc = new Label
-        {
-            Text = "This prompt tells the AI how to clean up your dictated speech before pasting. Customise the\ntone or style, e.g. \"rewrite formally\", \"keep it casual\", \"use British English\".",
-            Location = new Point(12, y), AutoSize = true,
-            ForeColor = Color.FromArgb(110, 110, 110),
-            Font = new Font("Segoe UI", 8.25f)
-        };
-        Controls.Add(desc);
-        y += 34;
-
-        _txtPrompt = new TextBox
-        {
-            Location = new Point(12, y), Size = new Size(496, 90),
-            Multiline = true, ScrollBars = ScrollBars.Vertical,
-            Text = _s.PolishPrompt,
-            Font = new Font("Segoe UI", 12f)
-        };
-        Controls.Add(_txtPrompt);
-        y += 98;
-
-        // === BUTTONS ===
-        var lblVersion = new Label
-        {
-            Text = AppVersion.Current, AutoSize = true,
-            ForeColor = Color.FromArgb(130, 130, 130),
-            Font = new Font("Segoe UI", 8f),
-            Location = new Point(12, y + 8)
-        };
-        Controls.Add(lblVersion);
-
-        var btnSave = new Button { Text = "Save", Size = new Size(80, 30), Location = new Point(340, y) };
-        btnSave.Click += (_, _) => { DoSave(); DialogResult = DialogResult.OK; Close(); };
-        Controls.Add(btnSave);
-
-        var btnCancel = new Button { Text = "Cancel", Size = new Size(80, 30), Location = new Point(428, y) };
-        btnCancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
-        Controls.Add(btnCancel);
-
-        FormClosed += (_, _) => StopVolumePreview();
-    }
-
-    // Drives the three sound combos from the selected preset. Selecting "Custom" leaves
-    // whatever is already chosen alone, so it never clobbers a hand-picked combination.
-    private void ApplyScheme()
-    {
-        var name = _cmbScheme.SelectedItem as string;
-        if (string.IsNullOrEmpty(name) || name == CUSTOM_SCHEME) return;
-
-        foreach (var s in AppSettings.SoundSchemes)
-        {
-            if (s.Name != name) continue;
-            _applyingScheme = true;
-            try
-            {
-                SelectWav(_cmbStart, s.Start);
-                SelectWav(_cmbDone, s.Done);
-                SelectWav(_cmbError, s.Error);
-            }
-            finally { _applyingScheme = false; }
-            PreviewScheme();
-            return;
-        }
-    }
-
-    // SndCombo stores display names without the .wav extension, so match on that.
-    private static void SelectWav(ComboBox cmb, string wavName)
-    {
-        var target = Path.GetFileNameWithoutExtension(wavName);
-        for (int i = 0; i < cmb.Items.Count; i++)
-        {
-            if (string.Equals(cmb.Items[i] as string, target, StringComparison.OrdinalIgnoreCase))
-            { cmb.SelectedIndex = i; return; }
-        }
-    }
-
-    // Plays start then done back to back so a scheme can be judged as a pair.
-    private void PreviewScheme()
-    {
-        StopVolumePreview();
-        var vol = _trkVolume.Value;
-        var start = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbStart));
-        var done = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbDone));
-        SoundPlayback.Play(start, vol);
-        var t = new System.Windows.Forms.Timer { Interval = 900 };
-        t.Tick += (_, _) => { t.Stop(); t.Dispose(); SoundPlayback.Play(done, vol); };
-        t.Start();
-    }
-
-    // Restarts the preview sound at the new volume on every slider change, stopping any
-    // still-playing previous preview first so a fast drag doesn't overlap garbled sounds.
-    private void PreviewVolume(int volumePercent)
-    {
-        StopVolumePreview();
-        try
-        {
-            var path = Path.Combine(AppSettings.MediaDir, SelectedWav(_cmbStart));
-            if (!File.Exists(path)) return;
-            _volumePreviewReader = new NAudio.Wave.AudioFileReader(path) { Volume = Math.Clamp(volumePercent, 0, 100) / 100f };
-            _volumePreviewOutput = new NAudio.Wave.WaveOutEvent();
-            _volumePreviewOutput.Init(_volumePreviewReader);
-            _volumePreviewOutput.Play();
-        }
-        catch { }
-    }
-
-    private void StopVolumePreview()
-    {
-        try { _volumePreviewOutput?.Stop(); _volumePreviewOutput?.Dispose(); _volumePreviewReader?.Dispose(); } catch { }
-        _volumePreviewOutput = null; _volumePreviewReader = null;
-    }
-
-    private void RefreshPreview()
-    {
-        float fs = (float)_numFont.Value;
-        int alpha = (int)(_trkOpacity.Value / 100.0 * 255);
-        _prevPanel.BackColor = Color.FromArgb(alpha, _bgColor.R, _bgColor.G, _bgColor.B);
-        _prevStatus.ForeColor = _statusColor;
-        _prevStatus.Font = new Font("Segoe UI", Math.Max(fs - 1.5f, 8f), FontStyle.Bold);
-        _prevStatus.Text = "\U0001F3A4 Listening...";
-        _prevText.ForeColor = _textColor;
-        _prevText.Font = new Font("Segoe UI", fs);
-        _prevText.Text = "This is how your transcript will look.";
-    }
-
-    private void DoSave()
-    {
-        _s.SoundsEnabled = _chkSounds.Checked;
-        _s.SoundVolume = _trkVolume.Value;
-        _s.SoundScheme = _cmbScheme.SelectedItem as string ?? CUSTOM_SCHEME;
-        _s.SoundStart = SelectedWav(_cmbStart);
-        _s.SoundDone = SelectedWav(_cmbDone);
-        _s.SoundError = SelectedWav(_cmbError);
-        _s.OverlayFontSize = (float)_numFont.Value;
-        _s.OverlayBgR = _bgColor.R; _s.OverlayBgG = _bgColor.G; _s.OverlayBgB = _bgColor.B;
-        _s.OverlayOpacity = _trkOpacity.Value;
-        _s.TextColorR = _textColor.R; _s.TextColorG = _textColor.G; _s.TextColorB = _textColor.B;
-        _s.StatusColorR = _statusColor.R; _s.StatusColorG = _statusColor.G; _s.StatusColorB = _statusColor.B;
-        _s.InputDeviceIndex = _cmbDevice.SelectedIndex - 1;
-        _s.SilenceTimeoutSec = (int)_numSilence.Value;
-        _s.PolishPrompt = _txtPrompt.Text;
-        _s.Save();
-    }
-
-    // --- Helpers ---
-
-    private Label Lbl(string text, int x, int y, bool bold = false)
-    {
-        var l = new Label
-        {
-            Text = text, Location = new Point(x, y), AutoSize = true,
-            Font = bold ? new Font("Segoe UI", 9.5f, FontStyle.Bold) : Font
-        };
-        Controls.Add(l); return l;
-    }
-
-    private ComboBox SndCombo(string currentFile, int x, int y)
-    {
-        var cmb = new ComboBox
-        {
-            Location = new Point(x, y), Size = new Size(380, 24),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        int selIdx = -1;
-        for (int i = 0; i < _wavNames.Length; i++)
-        {
-            cmb.Items.Add(Path.GetFileNameWithoutExtension(_wavNames[i]));
-            if (string.Equals(_wavNames[i], currentFile, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(Path.GetFileNameWithoutExtension(_wavNames[i]), currentFile, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(_wavNames[i], Path.GetFileName(currentFile), StringComparison.OrdinalIgnoreCase))
-                selIdx = i;
-        }
-        if (selIdx < 0 && !string.IsNullOrEmpty(currentFile))
-        {
-            string justName = Path.GetFileName(currentFile);
-            for (int i = 0; i < _wavNames.Length; i++)
-            {
-                if (string.Equals(_wavNames[i], justName, StringComparison.OrdinalIgnoreCase))
-                { selIdx = i; break; }
-            }
-        }
-        if (cmb.Items.Count > 0)
-            cmb.SelectedIndex = Math.Max(selIdx, 0);
-
-        // Hand-picking any individual sound means the selection no longer matches a
-        // preset, so drop the scheme to "Custom" — unless ApplyScheme is driving us.
-        cmb.SelectedIndexChanged += (_, _) =>
-        {
-            if (_applyingScheme || _cmbScheme == null) return;
-            _cmbScheme.SelectedItem = CUSTOM_SCHEME;
-        };
-        Controls.Add(cmb);
-
-        var btn = new Button
-        {
-            Text = "\u25B6", Size = new Size(26, 24), Location = new Point(x + 384, y),
-            Font = new Font("Segoe UI", 7f)
-        };
-        btn.Click += (_, _) =>
-        {
-            var path = Path.Combine(AppSettings.MediaDir, SelectedWav(cmb));
-            SoundPlayback.Play(path, _trkVolume.Value);
-        };
-        Controls.Add(btn);
-        return cmb;
-    }
-
-    private string SelectedWav(ComboBox cmb)
-    {
-        if (cmb.SelectedIndex < 0 || cmb.SelectedIndex >= _wavNames.Length) return "";
-        return _wavNames[cmb.SelectedIndex];
-    }
-
-    private Panel ColorSwatch(Color c, int x, int y, Action<Color> onChange)
-    {
-        var p = new Panel
-        {
-            Location = new Point(x, y), Size = new Size(30, 20),
-            BackColor = c, BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand
-        };
-        p.Click += (_, _) =>
-        {
-            using var dlg = new ColorDialog { Color = p.BackColor, FullOpen = true };
-            if (dlg.ShowDialog() == DialogResult.OK) { p.BackColor = dlg.Color; onChange(dlg.Color); }
-        };
-        Controls.Add(p); return p;
     }
 }
 
@@ -765,7 +343,7 @@ sealed class OverlayForm : Form
     // Breathing room between the title and the transcript.
     private const int TITLE_GAP = 10;
 
-    private const float STATUS_FONT_SCALE = 1.04f;
+
 
     private int _bottomAnchor;
     private int _targetHeight = MIN_HEIGHT;
@@ -787,7 +365,7 @@ sealed class OverlayForm : Form
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(380, MIN_HEIGHT);
+        Size = new Size(330, MIN_HEIGHT);
         DoubleBuffered = true;
 
         // Rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2).
@@ -804,7 +382,9 @@ sealed class OverlayForm : Form
             Dock = DockStyle.Top, Height = STATUS_H,
             BackColor = Color.Transparent,
             AutoSize = false, Text = "",
-            TextAlign = ContentAlignment.MiddleCenter
+            TextAlign = ContentAlignment.MiddleLeft,
+            // Reserve the close circle's column so a long status cannot run under it.
+            Padding = new Padding(0, 0, CLOSE_SIZE + 12, 0)
         };
 
         _textLabel = new Label
@@ -955,7 +535,7 @@ sealed class OverlayForm : Form
 
         _statusLabel.ForeColor = s.StatusColor;
         _statusLabel.Font = new Font("Segoe UI",
-            Math.Max(s.OverlayFontSize - 1.5f, 8f) * STATUS_FONT_SCALE, FontStyle.Bold);
+            Math.Clamp(s.OverlayTitleFontSize, 7f, 24f), FontStyle.Bold);
 
         // The whole window is layered, so a control cannot be more opaque than the form.
         // "More opaque" is achieved by making the chip read as solid: a notably lighter
