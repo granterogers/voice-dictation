@@ -130,6 +130,10 @@ class AppSettings
     public int StatusColorG { get; set; } = 180;
     public int StatusColorB { get; set; } = 255;
     public int InputDeviceIndex { get; set; } = -1;
+
+    // Seconds of no NEW transcribed words before dictation finishes by itself.
+    // 0 = never stop automatically (end it with a click or the hotkey).
+    public int SilenceTimeoutSec { get; set; } = 5;
     public string PolishPrompt { get; set; } =
         "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar.\n\n" +
         "Format the result like a well-structured email or message:\n" +
@@ -226,6 +230,7 @@ sealed class SettingsForm : Form
     private NAudio.Wave.WaveOutEvent _volumePreviewOutput;
     private NAudio.Wave.AudioFileReader _volumePreviewReader;
     private readonly NumericUpDown _numFont;
+    private readonly NumericUpDown _numSilence;
     private readonly TextBox _txtPrompt;
     private readonly TrackBar _trkOpacity;
     private readonly Label _lblOpacity;
@@ -277,7 +282,7 @@ sealed class SettingsForm : Form
         MaximizeBox = false; MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
-        ClientSize = new Size(520, 694);
+        ClientSize = new Size(520, 740);
 
         var y = 10;
 
@@ -295,6 +300,18 @@ sealed class SettingsForm : Form
         if (_cmbDevice.SelectedIndex < 0) _cmbDevice.SelectedIndex = 0;
         Controls.Add(_cmbDevice);
         y += 32;
+
+        // === WHEN TO STOP ===
+        Lbl("Finish Dictation", 12, y, true); y += 22;
+        Lbl("Stop after", 12, y + 4);
+        _numSilence = new NumericUpDown
+        {
+            Location = new Point(78, y), Size = new Size(60, 24),
+            Minimum = 0, Maximum = 30, Value = Math.Clamp(_s.SilenceTimeoutSec, 0, 30)
+        };
+        Controls.Add(_numSilence);
+        Lbl("seconds with no words spoken   (0 = only stop when I click or press the hotkey)", 146, y + 4);
+        y += 34;
 
         // === SOUNDS ===
         Lbl("Sounds", 12, y, true); y += 22;
@@ -528,6 +545,7 @@ sealed class SettingsForm : Form
         _s.TextColorR = _textColor.R; _s.TextColorG = _textColor.G; _s.TextColorB = _textColor.B;
         _s.StatusColorR = _statusColor.R; _s.StatusColorG = _statusColor.G; _s.StatusColorB = _statusColor.B;
         _s.InputDeviceIndex = _cmbDevice.SelectedIndex - 1;
+        _s.SilenceTimeoutSec = (int)_numSilence.Value;
         _s.PolishPrompt = _txtPrompt.Text;
         _s.Save();
     }
@@ -1161,14 +1179,14 @@ sealed class AudioRecorder : IDisposable
 {
     public const int SAMPLE_RATE = 16000;
     private const double SILENCE_THRESHOLD = 0.005;
-    private const double SILENCE_DURATION = 2.0;
+
     private const int MAX_RECORD_SEC = 300;
 
     private readonly WaveInEvent _capture;
     private readonly MemoryStream _ms;
     private readonly WaveFileWriter _writer;
     private readonly ManualResetEventSlim _done = new(false);
-    private readonly bool _autoStopOnSilence;
+
     private volatile bool _speechStarted;
     private bool _capHit;
     private double _silenceAccum;
@@ -1184,16 +1202,18 @@ sealed class AudioRecorder : IDisposable
     // so the pipeline uses this to discard a recording that never contained speech.
     public bool SpeechDetected => _speechStarted;
 
+    // Quiet time (seconds) since the last chunk that exceeded SILENCE_THRESHOLD.
+    // Used only as a fallback when live transcription is unavailable.
+    public double SilenceSeconds { get { lock (_lock) return _silenceAccum; } }
+
     // ---- NEW: snapshot of bytes written at last chunk boundary ----
     private int _bytesAtLastChunk = 0;
     public int BytesSinceLastChunk { get { lock (_lock) return _totalBytesWritten - _bytesAtLastChunk; } }
     public void MarkChunkSent() { lock (_lock) _bytesAtLastChunk = _totalBytesWritten; }
 
-    // autoStopOnSilence: when false the mic runs until StopNow() (or the hard cap).
-    // Click-to-toggle dictation uses false so the second click is what ends it.
-    public AudioRecorder(int deviceIndex = -1, bool autoStopOnSilence = true)
+    public AudioRecorder(int deviceIndex = -1)
     {
-        _autoStopOnSilence = autoStopOnSilence;
+
         _ms = new MemoryStream();
         var fmt = new WaveFormat(SAMPLE_RATE, 16, 1);
         _writer = new WaveFileWriter(new IgnoreDisposeStream(_ms), fmt);
@@ -1221,11 +1241,15 @@ sealed class AudioRecorder : IDisposable
         double elapsed = (DateTime.UtcNow - _startTime).TotalSeconds;
         double chunkSec = (double)e.BytesRecorded / _capture.WaveFormat.AverageBytesPerSecond;
 
-        if (rms > SILENCE_THRESHOLD) { _speechStarted = true; _silenceAccum = 0; }
-        else if (_autoStopOnSilence && _speechStarted && elapsed > 2.0)
+        // Accumulate quiet time and expose it, but do not stop here. Whether a pause
+        // means "finished" is decided by RunPipeline, which has the far better signal:
+        // whether the live transcription is still producing new WORDS. Audio energy
+        // alone is defeated by a fan or air conditioning, which never falls below the
+        // threshold, so the old silence auto-stop effectively never fired.
+        lock (_lock)
         {
-            _silenceAccum += chunkSec;
-            if (_silenceAccum >= SILENCE_DURATION) _capture.StopRecording();
+            if (rms > SILENCE_THRESHOLD) { _speechStarted = true; _silenceAccum = 0; }
+            else if (_speechStarted) _silenceAccum += chunkSec;
         }
 
         if (elapsed > MAX_RECORD_SEC && !_capHit)
@@ -1553,10 +1577,12 @@ sealed class TrayApp : ApplicationContext
         PlaySound(_settings.SoundStartPath);
         _overlay.ShowOverlay("\U0001F3A4 Listening...");
 
-        bool manualStop = _manualStopOnly;
-        Log.Write("MODE", manualStop ? "manual stop (click to end)" : "auto-stop on silence");
+        // 0 disables auto-stop entirely (end it with a click or the hotkey).
+        int idleStopSec = Math.Max(0, _settings.SilenceTimeoutSec);
+        Log.Write("MODE", (_manualStopOnly ? "click-started" : "hotkey-started")
+            + (idleStopSec > 0 ? $", auto-stop after {idleStopSec}s with no new words" : ", manual stop only"));
 
-        using var rec = new AudioRecorder(_settings.InputDeviceIndex, autoStopOnSilence: !manualStop);
+        using var rec = new AudioRecorder(_settings.InputDeviceIndex);
         _activeRecorder = rec;
         rec.Start();
 
@@ -1566,21 +1592,43 @@ sealed class TrayApp : ApplicationContext
         // Whether a live-preview transcription is currently in flight
         bool previewInFlight = false;
 
+        var idle = new SpeechIdleTracker();
         var started = DateTime.UtcNow;
 
         while (!rec.IsFinished)
         {
             await Task.Delay(150);
 
-            // Manual-stop mode waits for a second click, so a stray click would otherwise
-            // hold the overlay open for the full 120s cap. If nothing was ever said,
-            // give up rather than sit there listening to an empty room.
-            if (manualStop && !rec.SpeechDetected
+            // Nothing was ever said — give up rather than listen to an empty room.
+            if (!rec.SpeechDetected
                 && (DateTime.UtcNow - started).TotalSeconds > MANUAL_IDLE_TIMEOUT_SEC)
             {
                 Log.Write("IDLE TIMEOUT", $"no speech within {MANUAL_IDLE_TIMEOUT_SEC}s");
                 _cancelRequested = true;
                 rec.StopNow();
+            }
+
+            // Finished speaking? Judged on new WORDS, so background noise does not hold
+            // the recording open. Audio energy is only the fallback for when live
+            // transcription has not produced anything yet (e.g. the API is unreachable).
+            if (idleStopSec > 0 && rec.SpeechDetected && !_cancelRequested)
+            {
+                // Never stop while a transcription is outstanding: it may well contain
+                // the words just spoken. Without this the clock keeps running through
+                // the request round-trip, so the effective timeout is shorter than the
+                // configured one by however long the preview took.
+                bool wordsIdle = idle.HasWordSignal && !previewInFlight
+                                 && idle.SecondsSinceNewWords >= idleStopSec;
+                bool soundIdle = !idle.HasWordSignal && rec.SilenceSeconds >= idleStopSec;
+
+                if (wordsIdle || soundIdle)
+                {
+                    Log.Write("AUTO-STOP", wordsIdle
+                        ? $"no new words for {idle.SecondsSinceNewWords:0.0}s (threshold {idleStopSec}s, {idle.WordCount} words)"
+                        : $"no sound for {rec.SilenceSeconds:0.0}s (threshold {idleStopSec}s, no live transcription)");
+                    PlayDoneOnce();
+                    rec.StopNow();
+                }
             }
 
             if (_cancelRequested)
@@ -1614,6 +1662,7 @@ sealed class TrayApp : ApplicationContext
                             // Keep liveText RAW — it is the fallback if the final
                             // transcription fails — and format only what is displayed.
                             liveText = t;
+                            idle.NoteTranscript(t);
                             _overlay.SetText(PreviewText(liveText));
                             _overlay.SetStatus("\U0001F3A4 Listening...");
                         }

@@ -17,6 +17,7 @@
        guarantees they exercise exactly the code that ships. -->
   <ItemGroup>
     <Compile Include="..\MessageFormatter.cs" Link="MessageFormatter.cs" />
+    <Compile Include="..\SpeechIdleTracker.cs" Link="SpeechIdleTracker.cs" />
   </ItemGroup>
 
   <ItemGroup>
