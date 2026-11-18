@@ -27,34 +27,6 @@ namespace VoiceDictation;
 // precisely the problem this replaces.
 // ============================================================================
 
-static class Theme
-{
-    public static readonly Color Bg = Color.FromArgb(26, 26, 32);
-    public static readonly Color Card = Color.FromArgb(34, 34, 42);
-    public static readonly Color CardHover = Color.FromArgb(42, 42, 52);
-    public static readonly Color CardEdge = Color.FromArgb(54, 54, 64);
-    public static readonly Color Field = Color.FromArgb(46, 46, 56);
-    public static readonly Color Text = Color.FromArgb(232, 232, 238);
-    public static readonly Color Muted = Color.FromArgb(150, 150, 164);
-    public static readonly Color Accent = Color.FromArgb(86, 156, 255);
-
-    public static Font UI(float size = 9f, FontStyle style = FontStyle.Regular)
-        => new Font("Segoe UI", size, style);
-
-    public static GraphicsPath RoundRect(Rectangle r, int radius)
-    {
-        int d = radius * 2;
-        var p = new GraphicsPath();
-        if (r.Width <= d || r.Height <= d) { p.AddRectangle(r); return p; }
-        p.AddArc(r.X, r.Y, d, d, 180, 90);
-        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
-    }
-}
-
 // Native TrackBar always paints as a light Windows control and cannot be themed.
 sealed class FlatSlider : Control
 {
@@ -235,6 +207,8 @@ sealed class SettingsForm : Form
     private readonly FlatSlider _sldVolume, _sldOpacity;
     private readonly Label _lblVolume, _lblOpacity;
     private readonly TextBox _txtPrompt;
+    private readonly Button _btnDark, _btnLight;
+    private bool _darkTheme;
 
     private Color _bgColor, _textColor, _statusColor;
     private bool _applyingScheme;
@@ -254,6 +228,7 @@ sealed class SettingsForm : Form
         _textColor = _s.TextColor;
         _statusColor = _s.StatusColor;
         _wavNames = GatherSounds();
+        _darkTheme = _s.DarkTheme;
 
         Text = "Voice Dictation — Settings";
         FormBorderStyle = FormBorderStyle.None;
@@ -282,6 +257,7 @@ sealed class SettingsForm : Form
         _body.BringToFront();
 
         // Order: the things tuned often first, the set-once ones last.
+        var secLook = AddSection("Appearance", 62);
         var secStop = AddSection("Finish Dictation", 86);
         var secSnd = AddSection("Sounds", 212);
         var secOv = AddSection("Overlay", 178);
@@ -293,6 +269,20 @@ sealed class SettingsForm : Form
         Hint(secStop.Content, "seconds with no words spoken", 86, 14);
         Hint(secStop.Content, "0 = never stop on its own; end it with a click or the hotkey.",
              16, 42, Theme.Muted);
+
+        // ---- Appearance ----
+        Hint(secLook.Content, "Theme", 16, 18);
+        _btnDark = FlatButton("Dark", 84, Theme.IsDark);
+        _btnDark.Location = new Point(76, 14);
+        _btnDark.Click += (_, _) => SetTheme(true);
+        secLook.Content.Controls.Add(_btnDark);
+
+        _btnLight = FlatButton("Light", 84, !Theme.IsDark);
+        _btnLight.Location = new Point(166, 14);
+        _btnLight.Click += (_, _) => SetTheme(false);
+        secLook.Content.Controls.Add(_btnLight);
+
+        Hint(secLook.Content, "Applies to every window, including the overlay.", 262, 18, Theme.Muted);
 
         // ---- Sounds ----
         var cs = secSnd.Content;
@@ -748,6 +738,26 @@ sealed class SettingsForm : Form
         StatusColorR = _statusColor.R, StatusColorG = _statusColor.G, StatusColorB = _statusColor.B,
     };
 
+    // Switching theme re-tints dozens of stock controls whose colours were assigned
+    // at construction. Rather than walking the tree and guessing each one's role,
+    // save what is on screen and rebuild the window — DialogResult.Retry tells
+    // TrayApp to reopen it. The overlay adopts the matching palette at the same time.
+    private void SetTheme(bool dark)
+    {
+        if (dark == _darkTheme) return;
+        _darkTheme = dark;
+
+        var ov = Theme.OverlayDefaults(dark);
+        _bgColor = ov.Bg; _textColor = ov.Text; _statusColor = ov.Status;
+
+        DoSave();
+        Theme.Apply(dark);
+
+        ClosePreview();
+        DialogResult = DialogResult.Retry;
+        Close();
+    }
+
     private void TogglePreview()
     {
         if (_preview != null && _preview.Visible) { ClosePreview(); return; }
@@ -795,6 +805,7 @@ sealed class SettingsForm : Form
         _s.TextColorR = _textColor.R; _s.TextColorG = _textColor.G; _s.TextColorB = _textColor.B;
         _s.StatusColorR = _statusColor.R; _s.StatusColorG = _statusColor.G; _s.StatusColorB = _statusColor.B;
 
+        _s.DarkTheme = _darkTheme;
         _s.PolishPrompt = _txtPrompt.Text;
         _s.Save();
     }

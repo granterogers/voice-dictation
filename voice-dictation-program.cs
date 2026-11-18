@@ -135,6 +135,9 @@ class AppSettings
     // Seconds of no NEW transcribed words before dictation finishes by itself.
     // 0 = never stop automatically (end it with a click or the hotkey).
     public int SilenceTimeoutSec { get; set; } = 5;
+
+    // Light/dark for every window, including the overlay.
+    public bool DarkTheme { get; set; } = true;
     public string PolishPrompt { get; set; } =
         "You are a dictation cleanup assistant. Fix punctuation, capitalization, and sentence structure. Keep the user's tone and meaning exactly. Do NOT add, remove, or change any content beyond fixing grammar.\n\n" +
         "Format the result like a well-structured email or message:\n" +
@@ -288,27 +291,9 @@ sealed class CloseCircle : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-
-        float d = Math.Min(Width, Height) - 2f;
-        if (d <= 2f) return;
-        var circle = new RectangleF(1f, 1f, d, d);
-
-        using (var fill = new SolidBrush(_hover ? MarkColor : CircleColor))
-            g.FillEllipse(fill, circle);
-        using (var edge = new Pen(Color.FromArgb(_hover ? 90 : 64, 255, 255, 255), 1f))
-            g.DrawEllipse(edge, circle);
-
-        // Inset the stroke so the X sits optically inside the circle.
-        float inset = d * 0.33f;
-        using var pen = new Pen(_hover ? Color.White : MarkColor, Math.Max(2.2f, d * 0.105f))
-        {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round
-        };
-        g.DrawLine(pen, circle.Left + inset, circle.Top + inset, circle.Right - inset, circle.Bottom - inset);
-        g.DrawLine(pen, circle.Right - inset, circle.Top + inset, circle.Left + inset, circle.Bottom - inset);
+        AppIcons.DrawCloseMark(e.Graphics, new RectangleF(0, 0, Width, Height),
+            _hover ? MarkColor : CircleColor,
+            _hover ? Color.White : MarkColor);
     }
 }
 
@@ -909,6 +894,7 @@ sealed class TrayApp : ApplicationContext
     public TrayApp()
     {
         _settings = AppSettings.Load();
+        Theme.Apply(_settings.DarkTheme);
         // 30s was too short once recordings could run long: a big WAV upload plus Whisper
         // could exceed it, and the catch fell back to a partial live preview.
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(180) };
@@ -938,8 +924,8 @@ sealed class TrayApp : ApplicationContext
 
         // Drawn rather than extracted from shell32 so idle and recording share one shape
         // and differ only in colour.
-        _iconIdle = DrawMicIcon(Color.FromArgb(56, 132, 255));   // #3884FF
-        _iconActive = DrawMicIcon(Color.FromArgb(235, 56, 56));  // #EB3838
+        _iconIdle = AppIcons.MicIcon(AppIcons.MicIdle);
+        _iconActive = AppIcons.MicIcon(AppIcons.MicRecording);
 
         _trayIcon = new NotifyIcon
         {
@@ -973,81 +959,58 @@ sealed class TrayApp : ApplicationContext
         PlaySound(_settings.SoundStartPath);
     }
 
+    // Rebuilt whenever the theme changes: the renderer reads Theme at paint time, but
+    // the item colours and fonts are assigned here.
     private ContextMenuStrip BuildMenu()
     {
-        var m = new ContextMenuStrip();
-        m.Items.Add("Voice Dictation (Win+\\)").Enabled = false;
-        m.Items.Add(AppVersion.Current).Enabled = false;
+        var m = new ContextMenuStrip
+        {
+            Renderer = new ThemedMenuRenderer(),
+            BackColor = Theme.Card,
+            ForeColor = Theme.Text,
+            Font = Theme.UI(9.5f),
+            ShowImageMargin = false,
+            DropShadowEnabled = true
+        };
+
+        // No title row: the tray tooltip already names the app and the hotkey.
+        m.Items.Add(Item("Getting Started", (_, _) => OpenGuide()));
+        m.Items.Add(Item("Settings…", (_, _) => OpenSettings()));
         m.Items.Add(new ToolStripSeparator());
-        m.Items.Add("Settings...", null, (_, _) => OpenSettings());
-        m.Items.Add(new ToolStripSeparator());
-        m.Items.Add("Quit", null, (_, _) =>
+        m.Items.Add(Item("Quit", (_, _) =>
         {
             HotkeyWindow.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ID);
             HotkeyWindow.UnregisterHotKey(_hotkeyWindow.Handle, HOTKEY_ESCAPE);
             _trayIcon.Visible = false; Application.Exit();
-        });
+        }));
         return m;
+
+        static ToolStripMenuItem Item(string text, EventHandler onClick)
+            => new(text, null, onClick) { Padding = new Padding(4, 3, 4, 3) };
+    }
+
+    private void OpenGuide()
+    {
+        using var g = new GuideForm(_settings);
+        g.ShowDialog();
     }
 
     private void OpenSettings()
     {
-        using var f = new SettingsForm(_settings);
-        if (f.ShowDialog() == DialogResult.OK)
+        // A theme switch rebuilds the window rather than re-tinting every stock control
+        // in place; SettingsForm signals that with DialogResult.Retry.
+        while (true)
         {
+            using var f = new SettingsForm(_settings);
+            var result = f.ShowDialog();
+
             _settings = AppSettings.Load();
+            Theme.Apply(_settings.DarkTheme);
             _overlay.ApplyColors(_settings);
+            _trayIcon.ContextMenuStrip = BuildMenu();
+
+            if (result != DialogResult.Retry) return;
         }
-    }
-
-    private static GraphicsPath RoundRect(float x, float y, float w, float h, float r)
-    {
-        var p = new GraphicsPath();
-        p.AddArc(x, y, r * 2, r * 2, 180, 90);
-        p.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
-        p.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
-        p.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
-        p.CloseFigure();
-        return p;
-    }
-
-    // The microphone glyph, authored on a 32-unit grid and scaled into a box of
-    // `box` pixels centred on (cx, cy).
-    private static void DrawMicGlyph(Graphics g, Color c, float cx, float cy, float box, float weight)
-    {
-        float u = box / 32f;
-        float X(float v) => cx + (v - 16f) * u;
-        float Y(float v) => cy + (v - 16f) * u;
-
-        using var brush = new SolidBrush(c);
-        using var pen = new Pen(c, weight * u) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-
-        using (var body = RoundRect(X(11), Y(2.5f), 10 * u, 17 * u, 5 * u))
-            g.FillPath(brush, body);
-
-        g.DrawArc(pen, X(6.5f), Y(10f), 19 * u, 15 * u, 0, 180);
-        g.DrawLine(pen, X(16), Y(25.5f), X(16), Y(28.5f));
-        g.DrawLine(pen, X(10.5f), Y(28.5f), X(21.5f), Y(28.5f));
-    }
-
-    // Solid rounded-square badge with the mic knocked out in white. A filled shape
-    // survives the drop to 16px far better than an outlined one: antialiasing turns a
-    // 1px stroke into two half-lit pixels, so thin detail goes grey rather than small.
-    private static Icon DrawMicIcon(Color color)
-    {
-        const float SIZE = 32f;
-        var b = new Bitmap((int)SIZE, (int)SIZE); // defaults to 32bpp ARGB
-        using var g = Graphics.FromImage(b);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Color.Transparent);
-
-        using (var brush = new SolidBrush(color))
-        using (var badge = RoundRect(0.5f, 0.5f, SIZE - 1f, SIZE - 1f, 8f))
-            g.FillPath(brush, badge);
-
-        DrawMicGlyph(g, Color.White, SIZE / 2f, SIZE / 2f, SIZE * 0.62f, 2.8f);
-
-        return Icon.FromHandle(b.GetHicon());
     }
 
     // A dictation cycle has three distinct phases. _isRecording spans the whole cycle,
