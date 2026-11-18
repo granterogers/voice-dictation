@@ -621,27 +621,107 @@ sealed class SettingsForm : Form
 // Overlay window
 // ============================================================================
 
+// Vertical gradient with a soft accent glow along the top edge and a hairline
+// border. Painted rather than a flat BackColor so the overlay reads as a panel
+// with depth instead of a grey rectangle.
+sealed class GradientPanel : Panel
+{
+    public Color TopColor = Color.FromArgb(42, 42, 50);
+    public Color BottomColor = Color.FromArgb(24, 24, 28);
+    public Color AccentColor = Color.FromArgb(120, 180, 255);
+
+    public GradientPanel()
+    {
+        DoubleBuffered = true;
+        ResizeRedraw = true;
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        var r = ClientRectangle;
+        if (r.Width <= 0 || r.Height <= 0) return;
+
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var fill = new LinearGradientBrush(
+                   new Rectangle(0, 0, r.Width, r.Height),
+                   TopColor, BottomColor, LinearGradientMode.Vertical))
+            g.FillRectangle(fill, r);
+
+        // Accent glow fading downward from the top edge.
+        int glowH = Math.Min(22, Math.Max(4, r.Height / 5));
+        using (var glow = new LinearGradientBrush(
+                   new Rectangle(0, 0, r.Width, glowH),
+                   Color.FromArgb(70, AccentColor), Color.FromArgb(0, AccentColor),
+                   LinearGradientMode.Vertical))
+            g.FillRectangle(glow, 0, 0, r.Width, glowH);
+
+        // Bright hairline right at the top, like a lit edge.
+        using (var lip = new SolidBrush(Color.FromArgb(150, AccentColor)))
+            g.FillRectangle(lip, 0, 0, r.Width, 1);
+
+        // Subtle outer border so the panel separates from whatever is behind it.
+        using (var pen = new Pen(Color.FromArgb(46, 255, 255, 255)))
+            g.DrawRectangle(pen, 0, 0, r.Width - 1, r.Height - 1);
+    }
+}
+
+// Circular close affordance, drawn rather than a "✕" glyph in a Button: a text
+// glyph sits on the font's baseline (never quite centred), hints unpredictably at
+// small sizes, and cannot be given rounded stroke ends. Two anti-aliased rounded
+// strokes inside a filled circle render identically at any size.
+sealed class CloseCircle : Control
+{
+    public Color CircleColor = Color.FromArgb(58, 58, 66);
+    public Color MarkColor = Color.FromArgb(236, 72, 62);
+    private bool _hover;
+
+    public CloseCircle()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
+                 | ControlStyles.OptimizedDoubleBuffer
+                 | ControlStyles.SupportsTransparentBackColor, true);
+        BackColor = Color.Transparent;
+        Cursor = Cursors.Hand;
+        TabStop = false;
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        float d = Math.Min(Width, Height) - 2f;
+        if (d <= 2f) return;
+        var circle = new RectangleF(1f, 1f, d, d);
+
+        using (var fill = new SolidBrush(_hover ? MarkColor : CircleColor))
+            g.FillEllipse(fill, circle);
+        using (var edge = new Pen(Color.FromArgb(_hover ? 90 : 64, 255, 255, 255), 1f))
+            g.DrawEllipse(edge, circle);
+
+        // Inset the stroke so the X sits optically inside the circle.
+        float inset = d * 0.33f;
+        using var pen = new Pen(_hover ? Color.White : MarkColor, Math.Max(2.2f, d * 0.105f))
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        g.DrawLine(pen, circle.Left + inset, circle.Top + inset, circle.Right - inset, circle.Bottom - inset);
+        g.DrawLine(pen, circle.Right - inset, circle.Top + inset, circle.Left + inset, circle.Bottom - inset);
+    }
+}
+
 sealed class OverlayForm : Form
 {
     private readonly Label _statusLabel;
     private readonly Label _textLabel;
-    private readonly Panel _panel;
-    private readonly Button _btnClose;
-
-    // --- dynamic height -----------------------------------------------------
-    // The window grows UPWARDS as the transcript gets longer: the bottom edge is
-    // pinned and the top edge rises, so it never creeps over the taskbar or shifts
-    // sideways. Growth is eased rather than stepped so it reads as a slide, not a jerk.
-    private const int MIN_HEIGHT = 124;
-    private const int PAD_H = 16;   // _panel left/right padding
-    private const int PAD_V = 12;   // _panel top/bottom padding
-    private const int STATUS_H = 24;
-
-    private readonly System.Windows.Forms.Timer _growTimer;
-    private int _bottomAnchor;      // screen Y of the fixed bottom edge
-    private int _targetHeight = MIN_HEIGHT;
-    private double _animHeight = MIN_HEIGHT;
-    private string _fullText = "";
+    private readonly GradientPanel _panel;
+    private readonly CloseCircle _btnClose;
 
     // X clicked: abandon the cycle and paste nothing, exactly like Escape.
     public event Action CloseClicked;
@@ -649,6 +729,39 @@ sealed class OverlayForm : Form
     // Body clicked: the user has finished speaking — stop the mic and process what
     // was captured, same as a second tray click.
     public event Action BodyClicked;
+
+    // --- layout -------------------------------------------------------------
+    // The window grows UPWARDS as the transcript gets longer: the bottom edge is
+    // pinned and the top edge rises, so it never creeps over the taskbar or shifts
+    // sideways. Growth is eased rather than stepped so it reads as a slide.
+    private const int MIN_HEIGHT = 124;
+    private const int PAD_H = 16;
+    private const int PAD_TOP = 8;          // tight: the title sits near the top edge
+    private const int PAD_BOTTOM = 12;
+    private const int CLOSE_SIZE = 34;
+
+    // The title row and the close circle share this height so their vertical centres
+    // line up exactly, rather than the title floating below the button.
+    private const int STATUS_H = CLOSE_SIZE;
+
+    // Breathing room between the title and the transcript.
+    private const int TITLE_GAP = 10;
+
+    private const float STATUS_FONT_SCALE = 1.04f;
+
+    private int _bottomAnchor;
+    private int _targetHeight = MIN_HEIGHT;
+    private double _animHeight = MIN_HEIGHT;
+    private string _fullText = "";
+    private double _baseOpacity = 0.75;
+
+    // --- animation ----------------------------------------------------------
+    private enum Anim { Hidden, Entering, Idle, Exiting }
+    private Anim _anim = Anim.Hidden;
+    private double _reveal;                       // 0 = tucked into the tray, 1 = shown
+    private const double REVEAL_STEP = 0.085;     // ~15ms ticks => ~200ms travel
+    private readonly System.Windows.Forms.Timer _animTimer;
+    private readonly System.Windows.Forms.Timer _topmostTimer;
 
     public OverlayForm(AppSettings s)
     {
@@ -658,41 +771,46 @@ sealed class OverlayForm : Form
         StartPosition = FormStartPosition.Manual;
         Size = new Size(380, MIN_HEIGHT);
         DoubleBuffered = true;
+
+        // Rounded corners (DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2).
         try { int pref = 2; DwmSetWindowAttribute(Handle, 33, ref pref, sizeof(int)); } catch { }
 
-        _panel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 12, 16, 12) };
+        _panel = new GradientPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(PAD_H, PAD_TOP, PAD_H, PAD_BOTTOM)
+        };
 
         _statusLabel = new Label
         {
-            Dock = DockStyle.Top, Height = 24,
+            Dock = DockStyle.Top, Height = STATUS_H,
             BackColor = Color.Transparent,
-            AutoSize = false, Text = ""
+            AutoSize = false, Text = "",
+            TextAlign = ContentAlignment.MiddleCenter
         };
 
         _textLabel = new Label
         {
             Dock = DockStyle.Fill,
             BackColor = Color.Transparent,
-            AutoSize = false, TextAlign = ContentAlignment.TopLeft, Text = ""
+            AutoSize = false, TextAlign = ContentAlignment.TopLeft, Text = "",
+            // Gap below the title, so the transcript is not crowded against it.
+            Padding = new Padding(0, TITLE_GAP, 0, 0)
         };
 
-        _btnClose = new Button
+        _btnClose = new CloseCircle
         {
-            Text = "✕",
-            Size = new Size(28, 28),
-            Location = new Point(Width - 36, 6),
-            FlatStyle = FlatStyle.Flat,
-            Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-            TabStop = false,
-            Cursor = Cursors.Hand
+            Size = new Size(CLOSE_SIZE, CLOSE_SIZE),
+            // Same vertical band as the title row, so the two centres align.
+            Location = new Point(Width - CLOSE_SIZE - 10, PAD_TOP)
         };
-        _btnClose.FlatAppearance.BorderSize = 0;
-        _btnClose.FlatAppearance.MouseOverBackColor = Color.FromArgb(200, 60, 60);
         _btnClose.Click += (_, _) => CloseClicked?.Invoke();
 
         _panel.Controls.Add(_textLabel);
         _panel.Controls.Add(_statusLabel);
-        Controls.Add(_btnClose);
+        // Parented to the gradient panel, not the form, so its transparent background
+        // resolves to the gradient behind it rather than the form's flat colour.
+        _panel.Controls.Add(_btnClose);
         Controls.Add(_panel);
         _btnClose.BringToFront();
 
@@ -707,50 +825,154 @@ sealed class OverlayForm : Form
 
         ApplyColors(s);
 
-        // WS_EX_NOACTIVATE means BringToFront() can't lift us above other apps, and any
-        // app going full-screen (or another topmost window appearing) silently drops us
-        // out of the topmost band. Re-assert the z-order on a timer while visible.
-        _topmostTimer = new System.Windows.Forms.Timer { Interval = 400 };
+        _topmostTimer = new System.Windows.Forms.Timer { Interval = 200 };
         _topmostTimer.Tick += (_, _) => AssertTopmost();
 
-        _growTimer = new System.Windows.Forms.Timer { Interval = 15 };  // ~60fps
-        _growTimer.Tick += (_, _) => StepGrow();
-    }
+        _animTimer = new System.Windows.Forms.Timer { Interval = 15 };   // ~60fps
+        _animTimer.Tick += (_, _) => StepAnimation();
 
-    // Exponential ease toward the target height. Each tick closes a fixed fraction of
-    // the remaining distance, so it starts quickly and settles gently, and a target
-    // that changes mid-flight is absorbed without restarting the animation.
-    private void StepGrow()
-    {
-        var diff = _targetHeight - _animHeight;
-        if (Math.Abs(diff) < 0.75)
+        // Re-assert z-order the instant another application comes to the foreground,
+        // rather than waiting up to a full timer interval to notice.
+        _foregroundProc = OnForegroundChanged;
+        try
         {
-            _animHeight = _targetHeight;
-            ApplyHeight((int)Math.Round(_animHeight));
-            _growTimer.Stop();
-            return;
+            _winEventHook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                IntPtr.Zero, _foregroundProc, 0, 0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         }
-
-        _animHeight += diff * 0.22;
-        ApplyHeight((int)Math.Round(_animHeight));
+        catch { }
     }
 
-    private void ApplyHeight(int h)
+    // ------------------------------------------------------------------ interop
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    private delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd,
+        int idObject, int idChild, uint thread, uint time);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr hmod,
+        WinEventProc cb, uint pid, uint tid, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+
+    // Held in a field: the hook keeps an unmanaged pointer to this delegate, and
+    // letting it be collected would crash the callback.
+    private readonly WinEventProc _foregroundProc;
+    private IntPtr _winEventHook = IntPtr.Zero;
+
+    private void OnForegroundChanged(IntPtr hook, uint ev, IntPtr hwnd,
+        int idObject, int idChild, uint thread, uint time)
     {
-        // Bottom edge pinned: the top edge is what moves.
-        SetBounds(Left, _bottomAnchor - h, Width, h);
-        AssertTopmost();
+        if (idObject != 0 /* OBJID_WINDOW */) return;
+        if (!Visible) return;
+        try { AssertTopmost(); } catch { }
     }
 
-    // Height the window needs for the current text, clamped so it can never run off
-    // the top of the screen.
+    // Push the window back into the topmost band without stealing focus. Setting
+    // TopMost alone is not enough — WinForms treats it as a no-op when the property
+    // is already true, even after the OS has demoted the window.
+    private void AssertTopmost()
+    {
+        if (!Visible || !IsHandleCreated) return;
+        try
+        {
+            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        catch { }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        if (_winEventHook != IntPtr.Zero)
+        {
+            try { UnhookWinEvent(_winEventHook); } catch { }
+            _winEventHook = IntPtr.Zero;
+        }
+        base.OnFormClosed(e);
+    }
+
+    // ------------------------------------------------------------------ colours
+
+    private static Color Shift(Color c, int d) => Color.FromArgb(
+        Math.Clamp(c.R + d, 0, 255), Math.Clamp(c.G + d, 0, 255), Math.Clamp(c.B + d, 0, 255));
+
+    public void ApplyColors(AppSettings s)
+    {
+        if (InvokeRequired) { Invoke(() => ApplyColors(s)); return; }
+
+        var bg = s.OverlayBgColor;
+        _baseOpacity = Math.Clamp(s.OverlayOpacity, 10, 100) / 100.0;
+
+        BackColor = Shift(bg, -6);
+        _panel.TopColor = Shift(bg, 20);
+        _panel.BottomColor = Shift(bg, -6);
+        _panel.AccentColor = s.StatusColor;
+        _panel.Invalidate();
+
+        // Only drive Opacity directly when no animation is in flight; otherwise the
+        // animation owns it and would be fighting this.
+        if (_anim == Anim.Idle || _anim == Anim.Hidden) Opacity = _baseOpacity;
+
+        _statusLabel.ForeColor = s.StatusColor;
+        _statusLabel.Font = new Font("Segoe UI",
+            Math.Max(s.OverlayFontSize - 1.5f, 8f) * STATUS_FONT_SCALE, FontStyle.Bold);
+
+        // The whole window is layered, so a control cannot be more opaque than the form.
+        // "More opaque" is achieved by making the chip read as solid: a notably lighter
+        // fill than the gradient behind it, and a bright glyph.
+        _btnClose.CircleColor = Shift(bg, 34);
+        _btnClose.MarkColor = Color.FromArgb(236, 72, 62);
+        _btnClose.Invalidate();
+        _textLabel.ForeColor = s.TextColor;
+        _textLabel.Font = new Font("Segoe UI", s.OverlayFontSize);
+    }
+
+    // ------------------------------------------------------------------ sizing
+
+    // Prefer the monitor the user is actually working on — the window that will
+    // receive the paste — rather than wherever the mouse happens to be parked.
+    private static Screen TargetScreen()
+    {
+        try
+        {
+            var fg = GetForegroundWindow();
+            if (fg != IntPtr.Zero)
+            {
+                var s = Screen.FromHandle(fg);
+                if (s != null) return s;
+            }
+        }
+        catch { }
+        try { return Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen!; }
+        catch { return Screen.PrimaryScreen!; }
+    }
+
     private int MeasureRequiredHeight(string text, out int maxTextHeight)
     {
-        var screen = Screen.FromPoint(new Point(Left + Width / 2, _bottomAnchor - 10))
-                     ?? Screen.PrimaryScreen;
-        var wa = screen!.WorkingArea;
-
-        int chromeH = PAD_V * 2 + STATUS_H;
+        var wa = TargetScreen().WorkingArea;
+        int chromeH = PAD_TOP + PAD_BOTTOM + STATUS_H + TITLE_GAP;
         int maxWindow = Math.Max(MIN_HEIGHT, (int)(wa.Height * 0.6));
         maxTextHeight = maxWindow - chromeH;
 
@@ -771,20 +993,21 @@ sealed class OverlayForm : Form
     {
         int wrapWidth = Math.Max(50, Width - PAD_H * 2);
 
-        Size Measure(string s) => TextRenderer.MeasureText(
-            s, _textLabel.Font, new Size(wrapWidth, int.MaxValue),
+        Size Measure(string str) => TextRenderer.MeasureText(
+            str, _textLabel.Font, new Size(wrapWidth, int.MaxValue),
             TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
 
-        if (Measure(text).Height <= maxTextHeight) return text;
+        if (string.IsNullOrEmpty(text) || Measure(text).Height <= maxTextHeight) return text;
 
-        // Drop whole words from the front until it fits.
         var words = text.Split(' ');
         int lo = 0, hi = words.Length;
         while (lo < hi)
         {
             int mid = (lo + hi) / 2;
-            var candidate = "… " + string.Join(" ", words.Skip(mid));
-            if (Measure(candidate).Height <= maxTextHeight) hi = mid; else lo = mid + 1;
+            if (Measure("… " + string.Join(" ", words.Skip(mid))).Height <= maxTextHeight)
+                hi = mid;
+            else
+                lo = mid + 1;
         }
         return "… " + string.Join(" ", words.Skip(lo));
     }
@@ -793,84 +1016,102 @@ sealed class OverlayForm : Form
     {
         int required = MeasureRequiredHeight(_fullText, out int maxTextHeight);
         _textLabel.Text = FitToHeight(_fullText, maxTextHeight);
-
-        if (required != _targetHeight)
-        {
-            _targetHeight = required;
-            if (Visible && !_growTimer.Enabled) _growTimer.Start();
-        }
+        _targetHeight = required;
+        if (Visible && !_animTimer.Enabled) _animTimer.Start();
     }
 
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+    // ------------------------------------------------------------------ animation
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
-        int X, int Y, int cx, int cy, uint uFlags);
+    // Smoothstep: symmetric, zero velocity at both ends, so the slide eases out of
+    // the tray and settles without a visible stop.
+    private static double Smooth(double t) => t * t * (3.0 - 2.0 * t);
 
-    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-    private const uint SWP_NOSIZE = 0x0001;
-    private const uint SWP_NOMOVE = 0x0002;
-    private const uint SWP_NOACTIVATE = 0x0010;
-    private const uint SWP_SHOWWINDOW = 0x0040;
-
-    private readonly System.Windows.Forms.Timer _topmostTimer;
-
-    // Push the window back into the topmost band without stealing focus. Setting
-    // TopMost alone is not enough — WinForms treats it as a no-op when the property
-    // is already true, even after the OS has demoted the window.
-    private void AssertTopmost()
+    private void StepAnimation()
     {
-        if (!Visible || !IsHandleCreated) return;
-        try
+        bool busy = false;
+
+        switch (_anim)
         {
-            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            case Anim.Entering:
+                _reveal += REVEAL_STEP;
+                if (_reveal >= 1.0) { _reveal = 1.0; _anim = Anim.Idle; }
+                busy = true;
+                break;
+
+            case Anim.Exiting:
+                _reveal -= REVEAL_STEP;
+                if (_reveal <= 0.0)
+                {
+                    _reveal = 0.0;
+                    _anim = Anim.Hidden;
+                    _animTimer.Stop();
+                    _topmostTimer.Stop();
+                    Hide();
+                    return;
+                }
+                busy = true;
+                break;
         }
-        catch { }
+
+        // Ease the height toward its target. Closing a fixed FRACTION of the remaining
+        // distance each tick means a target that changes mid-flight is absorbed without
+        // restarting the animation — which matters because live transcription updates
+        // the target roughly once a second.
+        var diff = _targetHeight - _animHeight;
+        if (Math.Abs(diff) < 0.75) _animHeight = _targetHeight;
+        else { _animHeight += diff * 0.22; busy = true; }
+
+        ApplyFrame();
+
+        if (!busy && _anim == Anim.Idle) _animTimer.Stop();
     }
 
-    public void ApplyColors(AppSettings s)
+    private void ApplyFrame()
     {
-        if (InvokeRequired) { Invoke(() => ApplyColors(s)); return; }
-        BackColor = s.OverlayBgColor;
-        _panel.BackColor = s.OverlayBgColor;
-        Opacity = s.OverlayOpacity / 100.0;
-        _statusLabel.ForeColor = s.StatusColor;
-        _statusLabel.Font = new Font("Segoe UI", Math.Max(s.OverlayFontSize - 1.5f, 8f), FontStyle.Bold);
-        _btnClose.BackColor = s.OverlayBgColor;
-        _btnClose.ForeColor = s.TextColor;
-        _textLabel.ForeColor = s.TextColor;
-        _textLabel.Font = new Font("Segoe UI", s.OverlayFontSize);
+        int h = Math.Max(MIN_HEIGHT, (int)Math.Round(_animHeight));
+        double e = Smooth(Math.Clamp(_reveal, 0, 1));
+
+        // At reveal 0 the window sits fully below the work area — i.e. down in the
+        // tray — and rises into place as it reveals.
+        int restingTop = _bottomAnchor - h;
+        int slide = (int)Math.Round((1.0 - e) * (h + 56));
+
+        SetBounds(Left, restingTop + slide, Width, h);
+        Opacity = _baseOpacity * e;
+        AssertTopmost();
     }
+
+    // ------------------------------------------------------------------ public API
 
     public void ShowOverlay(string status)
     {
         if (InvokeRequired) { Invoke(() => ShowOverlay(status)); return; }
+
         _statusLabel.Text = status;
         _textLabel.Text = "";
         _fullText = "";
 
-        // Start collapsed again; each cycle grows from the minimum.
-        _growTimer.Stop();
         _targetHeight = MIN_HEIGHT;
         _animHeight = MIN_HEIGHT;
 
-        // Show on the monitor the user is actually working on, not always the primary
-        // one — otherwise the overlay renders off on another display and looks absent.
-        var screen = Screen.FromPoint(Cursor.Position) ?? Screen.PrimaryScreen!;
-        var wa = screen.WorkingArea;
+        var wa = TargetScreen().WorkingArea;
         Left = wa.Right - Width - 12;
-
-        // Pin the bottom edge: all later growth moves the TOP edge upwards.
         _bottomAnchor = wa.Bottom - 12;
-        Top = _bottomAnchor - MIN_HEIGHT;
-        Height = MIN_HEIGHT;
+
+        // Re-entering from a partially-faded exit continues from where it got to,
+        // so rapid start/stop never flashes.
+        if (_anim != Anim.Exiting) _reveal = 0.0;
+        _anim = Anim.Entering;
+
+        Opacity = _baseOpacity * Smooth(_reveal);
+        SetBounds(Left, _bottomAnchor - MIN_HEIGHT + (int)((1 - Smooth(_reveal)) * (MIN_HEIGHT + 56)),
+                  Width, MIN_HEIGHT);
 
         TopMost = true;
         Show();
         AssertTopmost();
         _topmostTimer.Start();
+        _animTimer.Start();
     }
 
     public void SetText(string text)
@@ -893,9 +1134,10 @@ sealed class OverlayForm : Form
     public void HideOverlay()
     {
         if (InvokeRequired) { Invoke(() => HideOverlay()); return; }
-        _topmostTimer.Stop();
-        _growTimer.Stop();
-        Hide();
+        if (!Visible) { _anim = Anim.Hidden; return; }
+        // Slide back down into the tray rather than vanishing.
+        _anim = Anim.Exiting;
+        _animTimer.Start();
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -905,7 +1147,7 @@ sealed class OverlayForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x08000000 | 0x00000080;
+            cp.ExStyle |= 0x08000000 | 0x00000080;   // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
             return cp;
         }
     }
@@ -1369,8 +1611,10 @@ sealed class TrayApp : ApplicationContext
                         var t = await Transcribe(wavSnapshot);
                         if (!string.IsNullOrWhiteSpace(t))
                         {
+                            // Keep liveText RAW — it is the fallback if the final
+                            // transcription fails — and format only what is displayed.
                             liveText = t;
-                            _overlay.SetText(liveText);
+                            _overlay.SetText(PreviewText(liveText));
                             _overlay.SetStatus("\U0001F3A4 Listening...");
                         }
                     }
@@ -1436,7 +1680,7 @@ sealed class TrayApp : ApplicationContext
             }
         }
 
-        _overlay.SetText(raw);
+        _overlay.SetText(PreviewText(raw));
         _overlay.SetStatus("\u2728 Cleaning up before pasting...");
 
         Log.Write("RAW", JsonSerializer.Serialize(raw));
@@ -1478,6 +1722,18 @@ sealed class TrayApp : ApplicationContext
         await Task.Delay(2000);
         _overlay.HideOverlay();
         Log.Write("=== CYCLE END ===");
+    }
+
+    // Run the same deterministic formatter used on the final output over the in-progress
+    // transcript, so the preview shows paragraph breaks, capitalisation and spacing as it
+    // builds rather than one dense run-on line. Display only — never mutates liveText,
+    // which has to stay raw for the fallback path. Falls back to the unformatted text if
+    // the formatter trips on a partial sentence.
+    private static string PreviewText(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return raw ?? "";
+        try { return MessageFormatter.EnforceMessageStructure(raw); }
+        catch { return raw; }
     }
 
     private async Task<string> Transcribe(byte[] wav)
